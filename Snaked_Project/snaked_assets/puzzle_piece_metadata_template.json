@@ -1,0 +1,25 @@
+{
+  "id": "",
+  "family_id": "",
+  "base_piece_id": "",
+  "variation_type": "",
+  "variation_index": 0,
+  "is_base_piece": false,
+  "name": "",
+  "category": "",
+  "difficulty": 0,
+  "grid_size": [
+    0,
+    0,
+    0
+  ],
+  "components": [],
+  "entry_points": [],
+  "exit_points": [],
+  "tags": [],
+  "requirements": [],
+  "effects": [],
+  "constraints": [],
+  "variation_notes": "",
+  "notes": ""
+}
