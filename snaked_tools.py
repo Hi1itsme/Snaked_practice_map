@@ -196,16 +196,21 @@ def _ensure_master(kind):
     return master
 
 
-def _placement_z(kind, layer):
+def _placement_z(kind, layer, on_solid=False):
     """World Z for a placed component's origin.
 
     Z equals the layer number (the grid plane at z = layer). Blocks and ramps
-    are centred on that plane like the grid's boxes; buttons sit on the tile's
-    top face, exactly as the original button.py raised the button by CUBE_TOP.
+    are centred on that plane like the grid's boxes. Buttons are overlays: when
+    a tile-filling solid (block/ramp) occupies the cell the button rests on that
+    tile's top face (`on_solid`); otherwise it sits flush on the layer's floor,
+    so a layer-0 button is level with the ground instead of floating at cube-top
+    height.
     """
     z = layer * LAYER_HEIGHT
     if kind == "BUTTON":
-        z += TILE_TOP + BUTTON_HEIGHT / 2.0
+        z += BUTTON_HEIGHT / 2.0
+        if on_solid:
+            z += TILE_TOP
     return z
 
 
@@ -236,14 +241,33 @@ def _iter_components_at(x, y, layer):
             yield obj
 
 
-def erase_component(x, y, layer):
-    """Remove any placed component(s) at the cell. Grid and masters are never
-    touched because we only ever look inside the Snaked_Components collection
-    and only remove objects tagged as placed components."""
+# Tile-filling solids: a button placed on such a cell rests on the tile's top.
+_SOLID_KINDS = {"BLOCK", "RAMP"}
+
+
+def _solid_at(x, y, layer):
+    """True if a tile-filling solid (block/ramp) occupies the cell."""
+    for obj in _iter_components_at(x, y, layer):
+        if obj.get("snaked_component") in _SOLID_KINDS:
+            return True
+    return False
+
+
+def erase_component(x, y, layer, only_kinds=None):
+    """Remove placed component(s) at the cell. Grid and masters are never touched
+    because we only ever look inside the Snaked_Components collection and only
+    remove objects tagged as placed components.
+
+    With `only_kinds` given, removes just components of those kinds, so a button
+    overlay and the solid beneath it can be replaced independently. With no
+    filter (the Erase tool) every component at the cell is removed.
+    """
     removed = 0
     for obj in _iter_components_at(x, y, layer):
         if "snaked_component" not in obj:
             continue  # safety: never remove anything we did not place
+        if only_kinds is not None and obj["snaked_component"] not in only_kinds:
+            continue
         mesh = obj.data if obj.type == 'MESH' else None
         bpy.data.objects.remove(obj, do_unlink=True)
         # Mesh data is shared with the master, so it will normally survive;
@@ -262,7 +286,14 @@ def place_component(kind, x, y, layer, rotation=0, name_id=""):
     """
     import math
 
-    erase_component(x, y, layer)
+    if kind == "BUTTON":
+        # Buttons are overlays -- only replace an existing button, never the
+        # solid they sit on (so a button on a block keeps the block).
+        erase_component(x, y, layer, only_kinds={"BUTTON"})
+    else:
+        # Tile-filling components are mutually exclusive; replace any other
+        # solid but keep a button overlay sitting on this cell.
+        erase_component(x, y, layer, only_kinds=_SOLID_KINDS)
 
     master = _ensure_master(kind)
     obj = bpy.data.objects.new(
@@ -270,7 +301,8 @@ def place_component(kind, x, y, layer, rotation=0, name_id=""):
         master.data,                 # shares the master mesh (linked duplicate)
     )
 
-    obj.location = (float(x), float(y), _placement_z(kind, layer))
+    obj.location = (float(x), float(y),
+                    _placement_z(kind, layer, on_solid=_solid_at(x, y, layer)))
     obj.rotation_euler = (0.0, 0.0, math.radians(rotation))
 
     # Tag the placement so erase can find it and never confuse it with a
@@ -284,6 +316,14 @@ def place_component(kind, x, y, layer, rotation=0, name_id=""):
 
     components = _get_or_create_collection(COMPONENTS_COLLECTION)
     components.objects.link(obj)
+
+    # If we just placed a solid beneath an existing button overlay, lift that
+    # button onto the new tile's top so it isn't left buried inside the solid.
+    if kind in _SOLID_KINDS:
+        for b in _iter_components_at(x, y, layer):
+            if b is not obj and b.get("snaked_component") == "BUTTON":
+                b.location.z = _placement_z("BUTTON", layer, on_solid=True)
+
     return obj
 
 

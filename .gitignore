@@ -6,3 +6,6 @@ __pycache__/
 # Blender
 *.blend1
 *.blend2
+
+# Generated project output (created by the workshop / level-saver scripts)
+Snaked_Project/
