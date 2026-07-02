@@ -73,7 +73,9 @@ Step 3 -- Place components:
     - Choose "Erase" + Place to remove the component at that cell.
 
 Re-running the script (Alt+P again) safely reloads the panel and rebuilds the
-empty zones; your placed components are kept.
+empty zones; your placed components are kept. Placed components also remember
+which area square they live in, so if an area is relocated (its *_ORIGIN_X/Y
+constants changed), re-running moves every piece along with its square.
 """
 
 import os
@@ -696,17 +698,74 @@ def _link_to_workshop(obj):
     coll.objects.link(obj)
 
 
-def _add_box(name, location, size, mat_name, color):
-    """Create a box (cube) mesh with explicit per-axis dimensions, in the workshop."""
-    import bpy
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
-    obj = bpy.context.active_object
-    obj.name = name
-    obj.scale = (size[0], size[1], size[2])
-    _link_to_workshop(obj)
-    _apply_material(obj, mat_name, color)
+class _GuideMeshBuilder:
+    """Accumulates axis-aligned boxes and emits them all as ONE mesh object.
+
+    Guide scenery (grid lines, borders) used to be one object -- with its own
+    mesh datablock, created via a bpy.ops call -- per line segment, which meant
+    thousands of objects, a huge .blend and a laggy viewport. Boxes added here
+    become faces of a single shared mesh instead; colours are kept via one
+    material slot per (name, colour) and per-face material indices.
+    """
+
+    # Standard cube faces over the 8 corner verts emitted by add_box.
+    _FACES = (
+        (0, 3, 2, 1), (4, 5, 6, 7),   # bottom, top
+        (0, 1, 5, 4), (1, 2, 6, 5),   # -Y, +X
+        (2, 3, 7, 6), (3, 0, 4, 7),   # +Y, -X
+    )
+
+    def __init__(self, name):
+        self.name = name
+        self.verts = []
+        self.faces = []
+        self.face_mats = []
+        self.mats = []           # (mat_name, color) in material-slot order
+        self._slot_by_name = {}
+
+    def _mat_slot(self, name, color):
+        slot = self._slot_by_name.get(name)
+        if slot is None:
+            slot = len(self.mats)
+            self._slot_by_name[name] = slot
+            self.mats.append((name, color))
+        return slot
+
+    def add_box(self, location, size, mat_name, color):
+        """Append a box with explicit per-axis dimensions, centred on location."""
+        cx, cy, cz = location
+        hx, hy, hz = size[0] / 2.0, size[1] / 2.0, size[2] / 2.0
+        base = len(self.verts)
+        self.verts.extend((
+            (cx - hx, cy - hy, cz - hz), (cx + hx, cy - hy, cz - hz),
+            (cx + hx, cy + hy, cz - hz), (cx - hx, cy + hy, cz - hz),
+            (cx - hx, cy - hy, cz + hz), (cx + hx, cy - hy, cz + hz),
+            (cx + hx, cy + hy, cz + hz), (cx - hx, cy + hy, cz + hz),
+        ))
+        slot = self._mat_slot(mat_name, color)
+        for f in self._FACES:
+            self.faces.append((base + f[0], base + f[1],
+                               base + f[2], base + f[3]))
+            self.face_mats.append(slot)
+
+    def build(self):
+        """Create and return the merged mesh object (not linked anywhere yet)."""
+        import bpy
+        mesh = bpy.data.meshes.new(self.name)
+        mesh.from_pydata(self.verts, [], self.faces)
+        for name, color in self.mats:
+            mesh.materials.append(_get_material(name, color))
+        mesh.polygons.foreach_set("material_index", self.face_mats)
+        mesh.update()
+        return bpy.data.objects.new(self.name, mesh)
+
+
+def _link_guide(builder):
+    """Build a guide builder's merged mesh object and link it into the workshop."""
+    obj = builder.build()
     # Guide geometry is scenery, not pieces -- keep it from getting in the way.
     obj.hide_select = True
+    _link_to_workshop(obj)
     return obj
 
 
@@ -718,6 +777,9 @@ def _add_label(text, x, y, color, size=1.4):
     curve.size = size
     curve.align_x = 'LEFT'
     curve.align_y = 'BOTTOM'
+    # Signage only needs to be readable -- a low curve resolution keeps a few
+    # hundred labels from weighing on every viewport redraw.
+    curve.resolution_u = 3
 
     obj = bpy.data.objects.new("Label_" + text.replace(" ", "_"), curve)
     bpy.context.scene.collection.objects.link(obj)
@@ -769,8 +831,8 @@ def _ramp_wall_bounds(index):
     return x0, y0, x1, y1
 
 
-def _draw_floor(x0, y0, x1, y1, prefix):
-    """Draw a flat grid floor over tile cells x0..x1, y0..y1 (inclusive).
+def _draw_floor(builder, x0, y0, x1, y1):
+    """Add a flat grid floor over tile cells x0..x1, y0..y1 (inclusive).
 
     Cells are centred on integer coords, so grid lines run along the
     half-integers from x0-0.5 to x1+0.5 (same scheme as snaked_map_builder).
@@ -787,24 +849,18 @@ def _draw_floor(x0, y0, x1, y1, prefix):
 
     # Lines parallel to Y (varying X).
     for i in range(int(round(x_span)) + 1):
-        _add_box(
-            "%s_LineY_%02d" % (prefix, i),
-            location=(x_lo + i, y_center, 0.0),
-            size=(line_thickness, y_span, line_thickness),
-            mat_name=mat_name, color=color,
-        )
+        builder.add_box((x_lo + i, y_center, 0.0),
+                        (line_thickness, y_span, line_thickness),
+                        mat_name, color)
     # Lines parallel to X (varying Y).
     for j in range(int(round(y_span)) + 1):
-        _add_box(
-            "%s_LineX_%02d" % (prefix, j),
-            location=(x_center, y_lo + j, 0.0),
-            size=(x_span, line_thickness, line_thickness),
-            mat_name=mat_name, color=color,
-        )
+        builder.add_box((x_center, y_lo + j, 0.0),
+                        (x_span, line_thickness, line_thickness),
+                        mat_name, color)
 
 
-def _draw_border(x0, y0, x1, y1, prefix, color):
-    """Draw a coloured frame around a zone so empty zones stay easy to read."""
+def _draw_border(builder, x0, y0, x1, y1, mat_name, color):
+    """Add a coloured frame around a zone so empty zones stay easy to read."""
     t = 0.08          # border thickness
     z = 0.04          # sits just above the floor lines
     x_lo, x_hi = x0 - 0.5, x1 + 0.5
@@ -813,56 +869,56 @@ def _draw_border(x0, y0, x1, y1, prefix, color):
     y_span = (y_hi - y_lo) + t
     x_center = (x_lo + x_hi) / 2.0
     y_center = (y_lo + y_hi) / 2.0
-    mat_name = "Workshop_Border_%s" % prefix
 
-    edges = {
-        "S": ((x_center, y_lo, z), (x_span, t, t)),   # bottom
-        "N": ((x_center, y_hi, z), (x_span, t, t)),   # top
-        "W": ((x_lo, y_center, z), (t, y_span, t)),   # left
-        "E": ((x_hi, y_center, z), (t, y_span, t)),   # right
-    }
-    for tag, (loc, size) in edges.items():
-        _add_box("%s_Border_%s" % (prefix, tag), loc, size, mat_name, color)
+    edges = (
+        ((x_center, y_lo, z), (x_span, t, t)),   # bottom
+        ((x_center, y_hi, z), (x_span, t, t)),   # top
+        ((x_lo, y_center, z), (t, y_span, t)),   # left
+        ((x_hi, y_center, z), (t, y_span, t)),   # right
+    )
+    for loc, size in edges:
+        builder.add_box(loc, size, mat_name, color)
 
 
-def _build_zone(index, title):
+def _build_zone(builder, index, title):
     """Draw one blank, labelled zone: floor grid + coloured border + header."""
     x0, y0, x1, y1 = _zone_bounds(index)
-    prefix = "Zone%d_%s" % (index, title.replace(" ", "_"))
     accent = ZONE_ACCENTS[index % len(ZONE_ACCENTS)]
-    _draw_floor(x0, y0, x1, y1, prefix)
-    _draw_border(x0, y0, x1, y1, prefix, accent)
+    _draw_floor(builder, x0, y0, x1, y1)
+    _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_Zone%d" % index, accent)
     # Header sits in the gap just above the zone's far (high-Y) edge.
     _add_label(title, x0 - 0.5, y1 + 1.0, accent)
 
 
-def _build_ramp_puzzle(index, name):
+def _build_ramp_puzzle(builder, index, name):
     """Draw one blank, labelled ramp-puzzle cell: floor + amber border + header."""
     x0, y0, x1, y1 = _ramp_puzzle_bounds(index)
-    prefix = "RampPuzzle%02d_%s" % (index, name.replace(" ", "_"))
-    _draw_floor(x0, y0, x1, y1, prefix)
-    _draw_border(x0, y0, x1, y1, prefix, RAMP_ACCENT)
+    _draw_floor(builder, x0, y0, x1, y1)
+    _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_RampPuzzles",
+                 RAMP_ACCENT)
     # Header sits in the gap just above the cell's far (high-Y) edge.
     _add_label(name, x0 - 0.5, y1 + 0.6, RAMP_ACCENT, size=1.1)
 
 
 def build_ramp_puzzle_area():
     """Draw the ramps-only puzzle area: one labelled cell per RAMP_PUZZLES name."""
+    builder = _GuideMeshBuilder("WS_Guide_RampPuzzles")
     for index, name in enumerate(RAMP_PUZZLES):
-        _build_ramp_puzzle(index, name)
+        _build_ramp_puzzle(builder, index, name)
+    _link_guide(builder)
     # A big banner above the whole area so it reads as "ramps only".
     _, _, _, top_y = _ramp_puzzle_bounds(len(RAMP_PUZZLES) - 1)
     _add_label("RAMP PUZZLES (ramps only)",
                RAMP_AREA_ORIGIN_X - 0.5, top_y + 3.0, RAMP_ACCENT, size=2.2)
 
 
-def _build_ramp_wall_puzzle(index):
+def _build_ramp_wall_puzzle(builder, index):
     """Draw one blank, labelled ramps+walls variation cell: floor + border + tag."""
     shape, letter, _col, _row = RAMP_WALL_CELLS[index]
     x0, y0, x1, y1 = _ramp_wall_bounds(index)
-    prefix = "RampWall%03d_%s_%s" % (index, shape.replace(" ", "_"), letter)
-    _draw_floor(x0, y0, x1, y1, prefix)
-    _draw_border(x0, y0, x1, y1, prefix, RAMP_WALL_ACCENT)
+    _draw_floor(builder, x0, y0, x1, y1)
+    _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_RampWalls",
+                 RAMP_WALL_ACCENT)
     # Header sits in the gap just above the cell's far (high-Y) edge.
     _add_label("%s %s" % (shape, letter),
                x0 - 0.5, y1 + 0.6, RAMP_WALL_ACCENT, size=1.1)
@@ -870,8 +926,10 @@ def _build_ramp_wall_puzzle(index):
 
 def build_ramp_wall_area():
     """Draw the ramps+walls area: lettered variation cells per ramp shape."""
+    builder = _GuideMeshBuilder("WS_Guide_RampWalls")
     for index in range(len(RAMP_WALL_CELLS)):
-        _build_ramp_wall_puzzle(index)
+        _build_ramp_wall_puzzle(builder, index)
+    _link_guide(builder)
     # A big banner above the whole area so it reads as "ramps + walls".
     _, _, _, top_y = _ramp_wall_bounds(len(RAMP_WALL_CELLS) - 1)
     _add_label("RAMPS + WALLS (lettered variations)",
@@ -896,14 +954,13 @@ def _ramp_wall_button_bounds(index):
     return x0, y0, x1, y1
 
 
-def _build_ramp_wall_button_puzzle(index):
+def _build_ramp_wall_button_puzzle(builder, index):
     """Draw one blank, labelled ramps+walls+buttons numbered cell."""
     shape, letter, number, _col, _row = RAMP_WALL_BUTTON_CELLS[index]
     x0, y0, x1, y1 = _ramp_wall_button_bounds(index)
-    prefix = "RampWallBtn%04d_%s_%s_%d" % (
-        index, shape.replace(" ", "_"), letter, number)
-    _draw_floor(x0, y0, x1, y1, prefix)
-    _draw_border(x0, y0, x1, y1, prefix, RAMP_WALL_BUTTON_ACCENT)
+    _draw_floor(builder, x0, y0, x1, y1)
+    _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_RampWallButtons",
+                 RAMP_WALL_BUTTON_ACCENT)
     # Header sits in the gap just above the cell's far (high-Y) edge.
     _add_label("%s %s %d" % (shape, letter, number),
                x0 - 0.5, y1 + 0.6, RAMP_WALL_BUTTON_ACCENT, size=1.0)
@@ -911,8 +968,10 @@ def _build_ramp_wall_button_puzzle(index):
 
 def build_ramp_wall_button_area():
     """Draw the ramps+walls+buttons area: numbered cells per ramps+walls piece."""
+    builder = _GuideMeshBuilder("WS_Guide_RampWallButtons")
     for index in range(len(RAMP_WALL_BUTTON_CELLS)):
-        _build_ramp_wall_button_puzzle(index)
+        _build_ramp_wall_button_puzzle(builder, index)
+    _link_guide(builder)
     # A big banner above the whole area so it reads as "ramps + walls + buttons".
     _, _, _, top_y = _ramp_wall_button_bounds(len(RAMP_WALL_BUTTON_CELLS) - 1)
     _add_label("RAMPS + WALLS + BUTTONS (numbered 1-%d)"
@@ -929,8 +988,10 @@ def build_blender_workshop():
     """
     clear_workshop()
     get_workshop_collection()
+    zones_builder = _GuideMeshBuilder("WS_Guide_WorkbenchZones")
     for index, title in enumerate(ZONES):
-        _build_zone(index, title)
+        _build_zone(zones_builder, index, title)
+    _link_guide(zones_builder)
     build_ramp_puzzle_area()
     build_ramp_wall_area()
     build_ramp_wall_button_area()
@@ -941,6 +1002,15 @@ def build_blender_workshop():
               len(RAMP_PUZZLES), RAMP_AREA_ORIGIN_X,
               len(RAMP_WALL_CELLS), RAMP_WALL_AREA_ORIGIN_X,
               len(RAMP_WALL_BUTTON_CELLS), RAMP_WALL_BUTTON_AREA_ORIGIN_X))
+
+    # Pieces follow their squares: adopt any pre-home-tag pieces where they
+    # stand, then pull every tagged piece onto its square's current location
+    # (a no-op unless an area was relocated since the last run).
+    tagged = tag_untagged_components()
+    moved = sync_components_to_layout()
+    if tagged or moved:
+        print("[Workshop] Home tags: %d piece(s) newly tagged, %d moved to "
+              "their square's current location." % (tagged, moved))
 
 
 # ===========================================================================
@@ -1221,6 +1291,9 @@ def place_workshop_component(kind, x, y, layer, rotation=0, name_id=""):
     obj["snaked_x"] = x
     obj["snaked_y"] = y
     obj["snaked_z"] = layer
+    # Home tag: which area square this piece lives in (and where inside it),
+    # so the piece follows its square if that area is ever relocated.
+    _tag_home(obj, x, y)
     # Ramps carry a facing; record it so a captured piece can be rotated/mirrored
     # later without having to read it back off rotation_euler.
     if kind == "RAMP":
@@ -1262,6 +1335,108 @@ def _area_cell_to_world(area, zone_index, ramp_index, ramp_wall_index, col, row,
     x = min(max(x0 + col, x0), x1)
     y = min(max(y0 + row, y0), y1)
     return x, y
+
+
+# ---------------------------------------------------------------------------
+# Home cells: pieces follow their square when an area is relocated
+# ---------------------------------------------------------------------------
+# Every placed component is stamped with a "home" -- which area, which cell in
+# it, and where inside that cell it sits. Positions are then derived, so if an
+# area's ORIGIN constants change, re-running the script (rebuild) moves every
+# piece along with its square via sync_components_to_layout(). Pieces placed
+# outside any square get no home and never move.
+
+# Area id -> (cell bounds function, cell count function).
+_AREA_BOUNDS = {
+    "WORKBENCH": (_zone_bounds, lambda: len(ZONES)),
+    "RAMP": (_ramp_puzzle_bounds, lambda: len(RAMP_PUZZLES)),
+    "RAMPWALL": (_ramp_wall_bounds, lambda: len(RAMP_WALL_CELLS)),
+    "RAMPWALLBUTTON": (_ramp_wall_button_bounds,
+                       lambda: len(RAMP_WALL_BUTTON_CELLS)),
+}
+
+
+def _locate_cell(x, y):
+    """(area, cell_index, dx, dy) of the cell containing tile (x, y), or None.
+
+    dx/dy are the tile's offset from the cell's low (bottom-left) corner. Only
+    meaningful while the layout matches the pieces on the ground -- i.e. tag at
+    placement time (or once, before any area is moved), never after a move.
+    """
+    for area, (bounds_fn, count_fn) in _AREA_BOUNDS.items():
+        for index in range(count_fn()):
+            x0, y0, x1, y1 = bounds_fn(index)
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return area, index, x - x0, y - y0
+    return None
+
+
+def _tag_home(obj, x, y):
+    """Stamp a component with the area square it sits in (no-op outside all)."""
+    home = _locate_cell(x, y)
+    if home is None:
+        return False
+    obj["snaked_area"], obj["snaked_cell"] = home[0], home[1]
+    obj["snaked_dx"], obj["snaked_dy"] = home[2], home[3]
+    return True
+
+
+def tag_untagged_components():
+    """Give every placed component that lacks one a home tag, from where it
+    currently sits. Returns the number of components newly tagged.
+
+    Pieces placed before home tags existed are adopted here -- which is only
+    correct while their positions still match the current layout, so this runs
+    on every rebuild: BEFORE an area is moved everything gets tagged; after a
+    move, everything already has its tag and this is a no-op.
+    """
+    import bpy
+    coll = bpy.data.collections.get(WORKSHOP_COMPONENTS_COLLECTION)
+    tagged = 0
+    if coll is None:
+        return tagged
+    for obj in coll.objects:
+        if "snaked_component" not in obj or "snaked_area" in obj:
+            continue
+        x, y = obj.get("snaked_x"), obj.get("snaked_y")
+        if x is None or y is None:
+            continue
+        if _tag_home(obj, x, y):
+            tagged += 1
+    return tagged
+
+
+def sync_components_to_layout():
+    """Move every home-tagged component to its square's CURRENT location.
+
+    A pure origin move translates the whole square's contents intact; if a
+    cell also shrank, offsets are clamped inside its new bounds. Layer (Z) is
+    untouched. Returns the number of components moved.
+    """
+    import bpy
+    coll = bpy.data.collections.get(WORKSHOP_COMPONENTS_COLLECTION)
+    moved = 0
+    if coll is None:
+        return moved
+    for obj in coll.objects:
+        if "snaked_component" not in obj or "snaked_area" not in obj:
+            continue
+        entry = _AREA_BOUNDS.get(obj["snaked_area"])
+        if entry is None:
+            continue
+        bounds_fn, count_fn = entry
+        index = int(obj.get("snaked_cell", 0))
+        if not (0 <= index < count_fn()):
+            continue
+        x0, y0, x1, y1 = bounds_fn(index)
+        x = min(x0 + int(obj.get("snaked_dx", 0)), x1)
+        y = min(y0 + int(obj.get("snaked_dy", 0)), y1)
+        if x == obj.get("snaked_x") and y == obj.get("snaked_y"):
+            continue
+        obj["snaked_x"], obj["snaked_y"] = x, y
+        obj.location.x, obj.location.y = float(x), float(y)
+        moved += 1
+    return moved
 
 
 # ===========================================================================
@@ -1512,22 +1687,8 @@ def clear_orientations(shape=None):
                 bpy.data.curves.remove(data)
 
 
-def _orient_box(coll, shape, name, location, size, color):
-    """A hide-select guide box linked to the orientations collection."""
-    import bpy
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
-    obj = bpy.context.active_object
-    obj.name = name
-    obj.scale = (size[0], size[1], size[2])
-    _link_to_collection(obj, coll)
-    _apply_material(obj, "Workshop_OrientBorder", color)
-    obj.hide_select = True
-    obj["snaked_orient_shape"] = shape
-    return obj
-
-
-def _orient_border(coll, shape, x0, y0, x1, y1, tag):
-    """Draw an amber frame around one orientation cell."""
+def _orient_border(builder, x0, y0, x1, y1):
+    """Add an amber frame around one orientation cell to the guide builder."""
     t, z = 0.08, 0.04
     x_lo, x_hi = x0 - 0.5, x1 + 0.5
     y_lo, y_hi = y0 - 0.5, y1 + 0.5
@@ -1535,16 +1696,14 @@ def _orient_border(coll, shape, x0, y0, x1, y1, tag):
     y_span = (y_hi - y_lo) + t
     xc = (x_lo + x_hi) / 2.0
     yc = (y_lo + y_hi) / 2.0
-    sid = shape.replace(" ", "_")
-    edges = {
-        "S": ((xc, y_lo, z), (x_span, t, t)),
-        "N": ((xc, y_hi, z), (x_span, t, t)),
-        "W": ((x_lo, yc, z), (t, y_span, t)),
-        "E": ((x_hi, yc, z), (t, y_span, t)),
-    }
-    for etag, (loc, size) in edges.items():
-        _orient_box(coll, shape, "WS_OrientBorder_%s_%s_%s" % (sid, tag, etag),
-                    loc, size, RAMP_ACCENT)
+    edges = (
+        ((xc, y_lo, z), (x_span, t, t)),
+        ((xc, y_hi, z), (x_span, t, t)),
+        ((x_lo, yc, z), (t, y_span, t)),
+        ((x_hi, yc, z), (t, y_span, t)),
+    )
+    for loc, size in edges:
+        builder.add_box(loc, size, "Workshop_OrientBorder", RAMP_ACCENT)
 
 
 def _orient_label(coll, shape, text, x, y, size=1.0):
@@ -1555,6 +1714,7 @@ def _orient_label(coll, shape, text, x, y, size=1.0):
     curve.size = size
     curve.align_x = 'LEFT'
     curve.align_y = 'BOTTOM'
+    curve.resolution_u = 3   # signage: readable at a fraction of the geometry
     obj = bpy.data.objects.new("OrientLabel_" + text.replace(" ", "_"), curve)
     bpy.context.scene.collection.objects.link(obj)
     obj.location = (float(x), float(y), 0.05)
@@ -1624,6 +1784,11 @@ def generate_ramp_puzzle_orientations(shape, components, root):
     _orient_label(coll, shape, shape,
                   RAMP_ORIENT_AREA_ORIGIN_X - 6.0, y0 + 0.5, size=1.3)
 
+    # All of this row's cell borders merge into ONE guide mesh object, tagged
+    # with the shape so clear_orientations(shape) still removes just this row.
+    guide = _GuideMeshBuilder(
+        "WS_OrientGuide_%s" % shape.replace(" ", "_"))
+
     pieces = []
     for col, (rotation, mirrored) in enumerate(orients):
         meta = _orientation_meta(rotation, mirrored, col)
@@ -1631,7 +1796,7 @@ def generate_ramp_puzzle_orientations(shape, components, root):
 
         x0 = RAMP_ORIENT_AREA_ORIGIN_X + col * stride
         x1, y1 = x0 + RAMP_CELL - 1, y0 + RAMP_CELL - 1
-        _orient_border(coll, shape, x0, y0, x1, y1, meta["tag"])
+        _orient_border(guide, x0, y0, x1, y1)
         _orient_label(coll, shape, "%s %s" % (shape, meta["label"]),
                       x0 - 0.5, y1 + 0.6, size=1.0)
 
@@ -1647,6 +1812,11 @@ def generate_ramp_puzzle_orientations(shape, components, root):
 
         pid = "%s_%s" % (fid, meta["tag"])
         pieces.append(_build_piece_dict(pid, fid, shape, meta, variant, base_id))
+
+    guide_obj = guide.build()
+    guide_obj.hide_select = True
+    guide_obj["snaked_orient_shape"] = shape
+    _link_to_collection(guide_obj, coll)
 
     variation_ids = [p["id"] for p in pieces if not p["is_base_piece"]]
     family = _build_family_dict(fid, shape, base_id, variation_ids)

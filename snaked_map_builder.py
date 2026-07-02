@@ -45,12 +45,6 @@ def _get_material(name, color):
     return mat
 
 
-def _apply_material(obj, name, color):
-    mat = _get_material(name, color)
-    obj.data.materials.clear()
-    obj.data.materials.append(mat)
-
-
 # ---------------------------------------------------------------------------
 # Collection / cleanup helpers
 # ---------------------------------------------------------------------------
@@ -89,22 +83,73 @@ def _link_to_map(obj):
 # Geometry helper
 # ---------------------------------------------------------------------------
 
-def _add_box(name, location, size):
-    """Create a box (cube) mesh object with explicit per-axis dimensions."""
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
-    obj = bpy.context.active_object
-    obj.name = name
-    obj.scale = (size[0], size[1], size[2])
-    _link_to_map(obj)
-    return obj
+class _GuideMeshBuilder:
+    """Accumulates axis-aligned boxes and emits them all as ONE mesh object.
+
+    The grid used to be one object -- with its own mesh datablock, created via
+    a bpy.ops call -- per line segment, which meant hundreds of objects and a
+    slow rebuild. Boxes added here become faces of a single shared mesh
+    instead; colours are kept via one material slot per (name, colour) and
+    per-face material indices.
+    """
+
+    # Standard cube faces over the 8 corner verts emitted by add_box.
+    _FACES = (
+        (0, 3, 2, 1), (4, 5, 6, 7),   # bottom, top
+        (0, 1, 5, 4), (1, 2, 6, 5),   # -Y, +X
+        (2, 3, 7, 6), (3, 0, 4, 7),   # +Y, -X
+    )
+
+    def __init__(self, name):
+        self.name = name
+        self.verts = []
+        self.faces = []
+        self.face_mats = []
+        self.mats = []           # (mat_name, color) in material-slot order
+        self._slot_by_name = {}
+
+    def _mat_slot(self, name, color):
+        slot = self._slot_by_name.get(name)
+        if slot is None:
+            slot = len(self.mats)
+            self._slot_by_name[name] = slot
+            self.mats.append((name, color))
+        return slot
+
+    def add_box(self, location, size, mat_name, color):
+        """Append a box with explicit per-axis dimensions, centred on location."""
+        cx, cy, cz = location
+        hx, hy, hz = size[0] / 2.0, size[1] / 2.0, size[2] / 2.0
+        base = len(self.verts)
+        self.verts.extend((
+            (cx - hx, cy - hy, cz - hz), (cx + hx, cy - hy, cz - hz),
+            (cx + hx, cy + hy, cz - hz), (cx - hx, cy + hy, cz - hz),
+            (cx - hx, cy - hy, cz + hz), (cx + hx, cy - hy, cz + hz),
+            (cx + hx, cy + hy, cz + hz), (cx - hx, cy + hy, cz + hz),
+        ))
+        slot = self._mat_slot(mat_name, color)
+        for f in self._FACES:
+            self.faces.append((base + f[0], base + f[1],
+                               base + f[2], base + f[3]))
+            self.face_mats.append(slot)
+
+    def build(self):
+        """Create and return the merged mesh object (not linked anywhere yet)."""
+        mesh = bpy.data.meshes.new(self.name)
+        mesh.from_pydata(self.verts, [], self.faces)
+        for name, color in self.mats:
+            mesh.materials.append(_get_material(name, color))
+        mesh.polygons.foreach_set("material_index", self.face_mats)
+        mesh.update()
+        return bpy.data.objects.new(self.name, mesh)
 
 
 # ---------------------------------------------------------------------------
 # Visible grid
 # ---------------------------------------------------------------------------
 
-def _create_grid_layer(width, height, layer, z):
-    """Draw a single flat width x height grid at height z (layer index for naming)."""
+def _create_grid_layer(builder, width, height, layer, z):
+    """Add a single flat width x height grid at height z to the guide builder."""
     line_thickness = 0.02
 
     # The floor layer is brighter; obstacle layers are dimmer.
@@ -123,23 +168,15 @@ def _create_grid_layer(width, height, layer, z):
 
     # Lines parallel to Y (varying X position).
     for i in range(width + 1):
-        x = x_lo + i
-        obj = _add_box(
-            "Grid_L%d_LineY_%02d" % (layer, i),
-            location=(x, y_center, z),
-            size=(line_thickness, y_span, line_thickness),
-        )
-        _apply_material(obj, mat_name, color)
+        builder.add_box((x_lo + i, y_center, z),
+                        (line_thickness, y_span, line_thickness),
+                        mat_name, color)
 
     # Lines parallel to X (varying Y position).
     for j in range(height + 1):
-        y = y_lo + j
-        obj = _add_box(
-            "Grid_L%d_LineX_%02d" % (layer, j),
-            location=(x_center, y, z),
-            size=(x_span, line_thickness, line_thickness),
-        )
-        _apply_material(obj, mat_name, color)
+        builder.add_box((x_center, y_lo + j, z),
+                        (x_span, line_thickness, line_thickness),
+                        mat_name, color)
 
 
 def create_grid(width=GRID_WIDTH, height=GRID_HEIGHT, num_layers=NUM_LAYERS):
@@ -147,11 +184,15 @@ def create_grid(width=GRID_WIDTH, height=GRID_HEIGHT, num_layers=NUM_LAYERS):
 
     Layer 0 (z=0) is the floor; layers 1..num_layers-1 are obstacle layers
     spaced LAYER_HEIGHT apart. Tiles are centered on integer coordinates
-    (0..width-1, 0..height-1) at each layer.
+    (0..width-1, 0..height-1) at each layer. Each layer's lines are merged
+    into ONE mesh object (Snaked_Grid_L<n>) so it can still be hidden per
+    layer without flooding the scene with per-line objects.
     """
     for layer in range(num_layers):
         z = layer * LAYER_HEIGHT
-        _create_grid_layer(width, height, layer, z)
+        builder = _GuideMeshBuilder("Snaked_Grid_L%d" % layer)
+        _create_grid_layer(builder, width, height, layer, z)
+        _link_to_map(builder.build())
 
 
 # ---------------------------------------------------------------------------
