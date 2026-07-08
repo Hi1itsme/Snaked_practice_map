@@ -79,14 +79,46 @@ constants changed), re-running moves every piece along with its square.
 """
 
 import os
+import sys
 import json
 import copy
+
+
+def _ensure_repo_on_path():
+    """Put this repo's folder on sys.path so `import snaked_common` works no
+    matter how the script is run (module import, blender --python, plain
+    python, or the Text Editor's Alt+P on a saved file)."""
+    dirs = []
+    try:
+        dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    try:
+        import bpy
+        dirs.extend(
+            os.path.dirname(os.path.abspath(bpy.path.abspath(t.filepath)))
+            for t in bpy.data.texts if t.filepath)
+        if bpy.data.filepath:
+            dirs.append(os.path.dirname(bpy.data.filepath))
+    except Exception:
+        pass
+    dirs.append(os.getcwd())
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, "snaked_common.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            return
+
+
+_ensure_repo_on_path()
+
+import snaked_common as sc
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-PROJECT_DIR_NAME = "Snaked_Project"   # root folder created on disk
+PROJECT_DIR_NAME = sc.PROJECT_DIR_NAME   # root folder created on disk
 
 COLLECTION_NAME = "Puzzle_Piece_Workshop"
 MAIN_MAP_COLLECTION = "Snaked_Map"    # never modified -- listed only for clarity
@@ -356,57 +388,12 @@ def _orientation_meta(rotation, mirrored, index):
     }
 
 
-def _xform_cell(cx, cy, rotation, mirrored):
-    """Transform a relative cell: mirror across X first, then rotate CCW."""
-    if mirrored:
-        cx = -cx
-    for _ in range((rotation // 90) % 4):
-        cx, cy = -cy, cx
-    return cx, cy
-
-
-def _xform_ramp_rotation(rrot, rotation, mirrored):
-    """Transform a ramp's facing to match a mirror-then-rotate of the piece.
-
-    A left<->right mirror sends facing r -> (360 - r); a flat CCW rotation by
-    `rotation` degrees adds that much. (Derived from the +Y-facing master at
-    r = 0: mirroring keeps +Y, while +X<->-X swap, i.e. r -> -r.)
-    """
-    if mirrored:
-        rrot = (360 - rrot) % 360
-    return (rrot + rotation) % 360
-
-
-def _transform_piece(components, rotation, mirrored):
-    """Return a new component list for one orientation, re-packed to (0, 0)."""
-    out = []
-    for c in components:
-        nx, ny = _xform_cell(c["x"], c["y"], rotation, mirrored)
-        nc = dict(c)
-        nc["x"], nc["y"] = nx, ny
-        if c.get("kind") == "RAMP":
-            nc["rotation"] = _xform_ramp_rotation(
-                c.get("rotation", 0), rotation, mirrored)
-        else:
-            nc["rotation"] = 0
-        out.append(nc)
-    if out:
-        minx = min(c["x"] for c in out)
-        miny = min(c["y"] for c in out)
-        for c in out:
-            c["x"] -= minx
-            c["y"] -= miny
-    return out
-
-
-def _piece_grid_size(components):
-    """[width, height, layers] bounding box of a relative-coord component list."""
-    if not components:
-        return [0, 0, 0]
-    w = max(c["x"] for c in components) + 1
-    h = max(c["y"] for c in components) + 1
-    layers = max(c.get("layer", 0) for c in components) + 1
-    return [w, h, layers]
+# The transform maths is shared (snaked_common) with snaked_tools' piece
+# assembler, so orientations generated here always match pieces stamped there.
+_xform_cell = sc.xform_cell
+_xform_ramp_rotation = sc.xform_ramp_rotation
+_transform_piece = sc.transform_piece
+_piece_grid_size = sc.piece_grid_size
 
 
 # ---- piece / family JSON builders + writers (pure Python) -----------------
@@ -465,16 +452,10 @@ def _build_family_dict(fid, shape, base_id, variation_ids):
 def _write_family_files(root, fid, family, pieces):
     """Write family.json + one piece_<tag>.json per orientation for a family."""
     family_dir = os.path.join(_pieces_dir(root), fid)
-    os.makedirs(family_dir, exist_ok=True)
-    with open(os.path.join(family_dir, "family.json"), "w", encoding="utf-8") as fh:
-        json.dump(family, fh, indent=2)
-        fh.write("\n")
+    sc.save_json(os.path.join(family_dir, "family.json"), family)
     for piece in pieces:
         tag = piece["id"][len(fid) + 1:]   # "<fid>_<tag>" -> "<tag>"
-        path = os.path.join(family_dir, "piece_%s.json" % tag)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(piece, fh, indent=2)
-            fh.write("\n")
+        sc.save_json(os.path.join(family_dir, "piece_%s.json" % tag), piece)
 
 
 def _register_pieces_in_index(root, family, pieces):
@@ -498,10 +479,7 @@ def _register_pieces_in_index(root, family, pieces):
     data["pieces"] = [p for p in data["pieces"]
                       if p.get("family_id") != fid] + list(pieces)
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
+    sc.save_json(path, data)
 
 
 # ===========================================================================
@@ -576,38 +554,9 @@ _JSON_FILES = {
 }
 
 
-def _base_dir():
-    """Best-effort folder to anchor the project root in.
-
-    Order of preference:
-      1. The saved .blend file's folder (when running inside Blender).
-      2. This script file's folder (saved .py / VS Code).
-      3. The current working directory.
-    """
-    try:
-        import bpy
-        if bpy.data.filepath:
-            return os.path.dirname(bpy.data.filepath)
-    except Exception:
-        pass
-    try:
-        return os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        return os.getcwd()
-
-
-def resolve_project_root():
-    """Return the absolute path of the Snaked_Project root.
-
-    If we're already running from somewhere inside an existing Snaked_Project
-    tree, reuse that root instead of nesting a second one.
-    """
-    base = os.path.normpath(_base_dir())
-    parts = base.split(os.sep)
-    if PROJECT_DIR_NAME in parts:
-        idx = len(parts) - 1 - parts[::-1].index(PROJECT_DIR_NAME)
-        return os.sep.join(parts[: idx + 1])
-    return os.path.join(base, PROJECT_DIR_NAME)
+# Root resolution is shared (snaked_common), so every script agrees on where
+# Snaked_Project lives.
+resolve_project_root = sc.resolve_project_root
 
 
 def setup_project_files():
@@ -627,9 +576,7 @@ def setup_project_files():
     for rel, contents in _JSON_FILES.items():
         path = os.path.join(root, *rel.split("/"))
         if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(contents, fh, indent=2)
-                fh.write("\n")
+            sc.save_json(path, contents)
             print("[Workshop] Created %s" % path)
         else:
             print("[Workshop] Kept existing %s" % path)
@@ -642,21 +589,9 @@ def setup_project_files():
 # PART 2 -- Blank Blender workshop (requires bpy / runs inside Blender)
 # ===========================================================================
 
-def _get_material(name, color):
-    """Return a flat-shaded material with the given name, creating it if needed."""
-    import bpy
-    mat = bpy.data.materials.get(name)
-    if mat is None:
-        mat = bpy.data.materials.new(name=name)
-        mat.use_nodes = False
-    mat.diffuse_color = (color[0], color[1], color[2], 1.0)
-    return mat
-
-
-def _apply_material(obj, name, color):
-    mat = _get_material(name, color)
-    obj.data.materials.clear()
-    obj.data.materials.append(mat)
+# Material helpers are shared (snaked_common).
+_get_material = sc.get_material
+_apply_material = sc.apply_material
 
 
 def get_workshop_collection():
@@ -680,84 +615,17 @@ def clear_workshop():
     if coll is None:
         return
     for obj in list(coll.objects):
-        data = obj.data if obj.type in {'MESH', 'FONT'} else None
-        bpy.data.objects.remove(obj, do_unlink=True)
-        if data is not None and data.users == 0:
-            if isinstance(data, bpy.types.Mesh):
-                bpy.data.meshes.remove(data)
-            elif isinstance(data, bpy.types.Curve):
-                bpy.data.curves.remove(data)
+        sc.remove_object_with_orphan_data(obj)
 
 
 def _link_to_workshop(obj):
     """Unlink an object from any other collection and place it in the workshop."""
-    import bpy
-    coll = get_workshop_collection()
-    for c in list(obj.users_collection):
-        c.objects.unlink(obj)
-    coll.objects.link(obj)
+    sc.link_to_collection(obj, get_workshop_collection())
 
 
-class _GuideMeshBuilder:
-    """Accumulates axis-aligned boxes and emits them all as ONE mesh object.
-
-    Guide scenery (grid lines, borders) used to be one object -- with its own
-    mesh datablock, created via a bpy.ops call -- per line segment, which meant
-    thousands of objects, a huge .blend and a laggy viewport. Boxes added here
-    become faces of a single shared mesh instead; colours are kept via one
-    material slot per (name, colour) and per-face material indices.
-    """
-
-    # Standard cube faces over the 8 corner verts emitted by add_box.
-    _FACES = (
-        (0, 3, 2, 1), (4, 5, 6, 7),   # bottom, top
-        (0, 1, 5, 4), (1, 2, 6, 5),   # -Y, +X
-        (2, 3, 7, 6), (3, 0, 4, 7),   # +Y, -X
-    )
-
-    def __init__(self, name):
-        self.name = name
-        self.verts = []
-        self.faces = []
-        self.face_mats = []
-        self.mats = []           # (mat_name, color) in material-slot order
-        self._slot_by_name = {}
-
-    def _mat_slot(self, name, color):
-        slot = self._slot_by_name.get(name)
-        if slot is None:
-            slot = len(self.mats)
-            self._slot_by_name[name] = slot
-            self.mats.append((name, color))
-        return slot
-
-    def add_box(self, location, size, mat_name, color):
-        """Append a box with explicit per-axis dimensions, centred on location."""
-        cx, cy, cz = location
-        hx, hy, hz = size[0] / 2.0, size[1] / 2.0, size[2] / 2.0
-        base = len(self.verts)
-        self.verts.extend((
-            (cx - hx, cy - hy, cz - hz), (cx + hx, cy - hy, cz - hz),
-            (cx + hx, cy + hy, cz - hz), (cx - hx, cy + hy, cz - hz),
-            (cx - hx, cy - hy, cz + hz), (cx + hx, cy - hy, cz + hz),
-            (cx + hx, cy + hy, cz + hz), (cx - hx, cy + hy, cz + hz),
-        ))
-        slot = self._mat_slot(mat_name, color)
-        for f in self._FACES:
-            self.faces.append((base + f[0], base + f[1],
-                               base + f[2], base + f[3]))
-            self.face_mats.append(slot)
-
-    def build(self):
-        """Create and return the merged mesh object (not linked anywhere yet)."""
-        import bpy
-        mesh = bpy.data.meshes.new(self.name)
-        mesh.from_pydata(self.verts, [], self.faces)
-        for name, color in self.mats:
-            mesh.materials.append(_get_material(name, color))
-        mesh.polygons.foreach_set("material_index", self.face_mats)
-        mesh.update()
-        return bpy.data.objects.new(self.name, mesh)
+# Guide scenery accumulates into ONE merged mesh object per area (shared:
+# see snaked_common.GuideMeshBuilder).
+_GuideMeshBuilder = sc.GuideMeshBuilder
 
 
 def _link_guide(builder):
@@ -769,25 +637,71 @@ def _link_guide(builder):
     return obj
 
 
-def _add_label(text, x, y, color, size=1.4):
-    """Add a flat text label lying on the floor (readable from the top view)."""
+# Tessellated label geometry, cached per (text, size): rebuilds in the same
+# session reuse it instead of re-evaluating font curves.
+_label_mesh_cache = {}
+
+
+def _text_mesh_data(text, size):
+    """Flat (verts, faces) tessellation of a text string.
+
+    Built through a throwaway FONT object; nothing is left behind in the
+    scene. Cached so repeated labels (and re-runs) do the work once.
+    """
     import bpy
-    curve = bpy.data.curves.new(type='FONT', name=text + "_Font")
+    key = (text, size)
+    cached = _label_mesh_cache.get(key)
+    if cached is not None:
+        return cached
+
+    curve = bpy.data.curves.new(type='FONT', name="WS_TmpLabel")
     curve.body = text
     curve.size = size
     curve.align_x = 'LEFT'
     curve.align_y = 'BOTTOM'
-    # Signage only needs to be readable -- a low curve resolution keeps a few
-    # hundred labels from weighing on every viewport redraw.
-    curve.resolution_u = 3
+    curve.resolution_u = 3   # signage: readable at a fraction of the geometry
+    obj = bpy.data.objects.new("WS_TmpLabel", curve)
 
-    obj = bpy.data.objects.new("Label_" + text.replace(" ", "_"), curve)
-    bpy.context.scene.collection.objects.link(obj)
-    obj.location = (float(x), float(y), 0.05)   # just above the floor; no z-fight
-    _link_to_workshop(obj)
-    _apply_material(obj, "Workshop_LabelMat", color)
-    obj.hide_select = True   # signage, not a draggable piece
-    return obj
+    me = None
+    try:
+        me = obj.to_mesh()
+    except RuntimeError:
+        me = None
+    if me is None or len(me.vertices) == 0:
+        # Fallback: evaluate through the depsgraph (needs a scene link).
+        if me is not None:
+            obj.to_mesh_clear()
+        bpy.context.scene.collection.objects.link(obj)
+        deps = bpy.context.evaluated_depsgraph_get()
+        me = bpy.data.meshes.new_from_object(obj.evaluated_get(deps))
+        verts = [tuple(v.co) for v in me.vertices]
+        faces = [tuple(p.vertices) for p in me.polygons]
+        bpy.data.meshes.remove(me)
+    else:
+        verts = [tuple(v.co) for v in me.vertices]
+        faces = [tuple(p.vertices) for p in me.polygons]
+        obj.to_mesh_clear()
+
+    bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.data.curves.remove(curve)
+    _label_mesh_cache[key] = (verts, faces)
+    return verts, faces
+
+
+def _add_label(builder, text, x, y, color, size=1.4):
+    """Bake a flat floor label into a guide builder (readable from top view).
+
+    Labels used to be one FONT object each -- hundreds of live curve objects
+    all weighing on the depsgraph. Tessellating them into the merged guide
+    mesh keeps signage at ZERO extra objects. The material is keyed by colour
+    (labels previously all shared one material, so every area's accent
+    overwrote the others').
+    """
+    verts, faces = _text_mesh_data(text, size)
+    mat_name = "Workshop_Label_%02X%02X%02X" % tuple(
+        int(c * 255 + 0.5) for c in color[:3])
+    # Just above the floor; no z-fight.
+    builder.add_mesh(verts, faces, (float(x), float(y), 0.05), mat_name, color)
 
 
 def _zone_bounds(index):
@@ -887,7 +801,7 @@ def _build_zone(builder, index, title):
     _draw_floor(builder, x0, y0, x1, y1)
     _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_Zone%d" % index, accent)
     # Header sits in the gap just above the zone's far (high-Y) edge.
-    _add_label(title, x0 - 0.5, y1 + 1.0, accent)
+    _add_label(builder, title, x0 - 0.5, y1 + 1.0, accent)
 
 
 def _build_ramp_puzzle(builder, index, name):
@@ -897,7 +811,7 @@ def _build_ramp_puzzle(builder, index, name):
     _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_RampPuzzles",
                  RAMP_ACCENT)
     # Header sits in the gap just above the cell's far (high-Y) edge.
-    _add_label(name, x0 - 0.5, y1 + 0.6, RAMP_ACCENT, size=1.1)
+    _add_label(builder, name, x0 - 0.5, y1 + 0.6, RAMP_ACCENT, size=1.1)
 
 
 def build_ramp_puzzle_area():
@@ -905,11 +819,11 @@ def build_ramp_puzzle_area():
     builder = _GuideMeshBuilder("WS_Guide_RampPuzzles")
     for index, name in enumerate(RAMP_PUZZLES):
         _build_ramp_puzzle(builder, index, name)
-    _link_guide(builder)
     # A big banner above the whole area so it reads as "ramps only".
     _, _, _, top_y = _ramp_puzzle_bounds(len(RAMP_PUZZLES) - 1)
-    _add_label("RAMP PUZZLES (ramps only)",
+    _add_label(builder, "RAMP PUZZLES (ramps only)",
                RAMP_AREA_ORIGIN_X - 0.5, top_y + 3.0, RAMP_ACCENT, size=2.2)
+    _link_guide(builder)
 
 
 def _build_ramp_wall_puzzle(builder, index):
@@ -920,7 +834,7 @@ def _build_ramp_wall_puzzle(builder, index):
     _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_RampWalls",
                  RAMP_WALL_ACCENT)
     # Header sits in the gap just above the cell's far (high-Y) edge.
-    _add_label("%s %s" % (shape, letter),
+    _add_label(builder, "%s %s" % (shape, letter),
                x0 - 0.5, y1 + 0.6, RAMP_WALL_ACCENT, size=1.1)
 
 
@@ -929,12 +843,12 @@ def build_ramp_wall_area():
     builder = _GuideMeshBuilder("WS_Guide_RampWalls")
     for index in range(len(RAMP_WALL_CELLS)):
         _build_ramp_wall_puzzle(builder, index)
-    _link_guide(builder)
     # A big banner above the whole area so it reads as "ramps + walls".
     _, _, _, top_y = _ramp_wall_bounds(len(RAMP_WALL_CELLS) - 1)
-    _add_label("RAMPS + WALLS (lettered variations)",
+    _add_label(builder, "RAMPS + WALLS (lettered variations)",
                RAMP_WALL_AREA_ORIGIN_X - 0.5, top_y + 3.0,
                RAMP_WALL_ACCENT, size=2.2)
+    _link_guide(builder)
 
 
 def _ramp_wall_button_bounds(index):
@@ -962,7 +876,7 @@ def _build_ramp_wall_button_puzzle(builder, index):
     _draw_border(builder, x0, y0, x1, y1, "Workshop_Border_RampWallButtons",
                  RAMP_WALL_BUTTON_ACCENT)
     # Header sits in the gap just above the cell's far (high-Y) edge.
-    _add_label("%s %s %d" % (shape, letter, number),
+    _add_label(builder, "%s %s %d" % (shape, letter, number),
                x0 - 0.5, y1 + 0.6, RAMP_WALL_BUTTON_ACCENT, size=1.0)
 
 
@@ -971,13 +885,13 @@ def build_ramp_wall_button_area():
     builder = _GuideMeshBuilder("WS_Guide_RampWallButtons")
     for index in range(len(RAMP_WALL_BUTTON_CELLS)):
         _build_ramp_wall_button_puzzle(builder, index)
-    _link_guide(builder)
     # A big banner above the whole area so it reads as "ramps + walls + buttons".
     _, _, _, top_y = _ramp_wall_button_bounds(len(RAMP_WALL_BUTTON_CELLS) - 1)
-    _add_label("RAMPS + WALLS + BUTTONS (numbered 1-%d)"
+    _add_label(builder, "RAMPS + WALLS + BUTTONS (numbered 1-%d)"
                % RAMP_WALL_BUTTON_VARIATIONS,
                RAMP_WALL_BUTTON_AREA_ORIGIN_X - 0.5, top_y + 3.0,
                RAMP_WALL_BUTTON_ACCENT, size=2.2)
+    _link_guide(builder)
 
 
 def build_blender_workshop():
@@ -1039,128 +953,38 @@ WS_MASTER_NAMES = {
     "BUTTON": "WS_Master_Button",
 }
 
-# Button geometry (matches snaked_tools / button.py).
-WS_BUTTON_RADIUS = 0.3
-WS_BUTTON_HEIGHT = 0.15
-WS_TILE_TOP = 0.5   # half a tile above centre -- the tile's top face
+# Button geometry (shared with snaked_tools / button.py via snaked_common).
+WS_BUTTON_RADIUS = sc.BUTTON_RADIUS
+WS_BUTTON_HEIGHT = sc.BUTTON_HEIGHT
+WS_TILE_TOP = sc.TILE_TOP   # half a tile above centre -- the tile's top face
 
 
 # ---------------------------------------------------------------------------
-# Placement collections
+# Placement collections (shared helpers: see snaked_common)
 # ---------------------------------------------------------------------------
 
-def _get_or_create_collection(name, hide_viewport=False):
-    """Return a scene collection with the given name, creating it if needed."""
-    import bpy
-    coll = bpy.data.collections.get(name)
-    if coll is None:
-        coll = bpy.data.collections.new(name)
-        bpy.context.scene.collection.children.link(coll)
-    coll.hide_viewport = hide_viewport
-    return coll
-
-
-def _link_to_collection(obj, coll):
-    """Unlink an object from every collection it is in, then link it to `coll`."""
-    for c in list(obj.users_collection):
-        c.objects.unlink(obj)
-    coll.objects.link(obj)
+_get_or_create_collection = sc.get_or_create_collection
+_link_to_collection = sc.link_to_collection
 
 
 # ---------------------------------------------------------------------------
 # Master / placeholder geometry (built once, hidden in the asset library)
 # ---------------------------------------------------------------------------
-
-def _ws_build_floor_master(name):
-    """Thin 1x1 plate centred on the tile -- a flat floor marker."""
-    import bpy
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, 0.0, 0.0))
-    obj = bpy.context.active_object
-    obj.name = name
-    obj.scale = (1.0, 1.0, 0.1)
-    _apply_material(obj, "WS_FloorMat", (0.45, 0.47, 0.50))   # grey
-    return obj
-
-
-def _ws_build_block_master(name):
-    """Solid 1x1x1 cube centred on the tile (matches the grid's centred boxes)."""
-    import bpy
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, 0.0, 0.0))
-    obj = bpy.context.active_object
-    obj.name = name
-    _apply_material(obj, "WS_BlockMat", (0.30, 0.55, 0.85))   # blue
-    return obj
-
-
-def _ws_build_wall_master(name):
-    """Solid 1x1x1 cube, darker than a block, to read as an impassable wall."""
-    import bpy
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, 0.0, 0.0))
-    obj = bpy.context.active_object
-    obj.name = name
-    _apply_material(obj, "WS_WallMat", (0.22, 0.24, 0.28))   # dark slate
-    return obj
-
-
-def _ws_build_button_master(name):
-    """Small flat cylinder; origin at its centre so it can rest on a tile top."""
-    import bpy
-    bpy.ops.mesh.primitive_cylinder_add(
-        vertices=24, radius=WS_BUTTON_RADIUS, depth=WS_BUTTON_HEIGHT,
-        location=(0.0, 0.0, 0.0),
-    )
-    obj = bpy.context.active_object
-    obj.name = name
-    _apply_material(obj, "WS_ButtonMat", (0.90, 0.20, 0.20))   # red
-    return obj
-
-
-def _ws_build_ramp_master(name):
-    """Sloped wedge filling one tile (+-0.5 on every axis), rising toward +Y.
-
-    Built with bmesh (Blender has no primitive wedge), centred on the origin to
-    match the centred-box convention. Identical shape to snaked_tools' ramp.
-    """
-    import bpy
-    import bmesh
-    h = 0.5
-    verts = [
-        (-h, -h, -h),  # 0 low edge, -X
-        ( h, -h, -h),  # 1 low edge, +X
-        ( h,  h, -h),  # 2 high edge base, +X
-        (-h,  h, -h),  # 3 high edge base, -X
-        ( h,  h,  h),  # 4 high edge top, +X
-        (-h,  h,  h),  # 5 high edge top, -X
-    ]
-    faces = [
-        (0, 1, 2, 3),  # bottom
-        (2, 4, 5, 3),  # vertical wall (+Y)
-        (0, 3, 5),     # left triangle (-X)
-        (1, 4, 2),     # right triangle (+X)
-        (0, 5, 4, 1),  # sloped top surface
-    ]
-    mesh = bpy.data.meshes.new("WS_RampMesh")
-    bm = bmesh.new()
-    bverts = [bm.verts.new(v) for v in verts]
-    for f in faces:
-        bm.faces.new([bverts[i] for i in f])
-    bm.normal_update()
-    bm.to_mesh(mesh)
-    bm.free()
-    mesh.update()
-
-    obj = bpy.data.objects.new(name, mesh)
-    bpy.context.scene.collection.objects.link(obj)
-    _apply_material(obj, "WS_RampMat", (0.95, 0.75, 0.15))   # amber
-    return obj
-
+# Shared geometry builders (snaked_common), this script's material names and
+# colours -- kept distinct from snaked_tools' masters so the two never collide.
 
 _WS_MASTER_BUILDERS = {
-    "FLOOR": _ws_build_floor_master,
-    "BLOCK": _ws_build_block_master,
-    "WALL": _ws_build_wall_master,
-    "RAMP": _ws_build_ramp_master,
-    "BUTTON": _ws_build_button_master,
+    "FLOOR": lambda name: sc.build_floor_master(
+        name, "WS_FloorMat", (0.45, 0.47, 0.50)),    # grey
+    "BLOCK": lambda name: sc.build_cube_master(
+        name, "WS_BlockMat", (0.30, 0.55, 0.85)),    # blue
+    "WALL": lambda name: sc.build_cube_master(
+        name, "WS_WallMat", (0.22, 0.24, 0.28)),     # dark slate
+    "RAMP": lambda name: sc.build_ramp_master(
+        name, "WS_RampMat", (0.95, 0.75, 0.15),      # amber
+        mesh_name="WS_RampMesh"),
+    "BUTTON": lambda name: sc.build_button_master(
+        name, "WS_ButtonMat", (0.90, 0.20, 0.20)),   # red
 }
 
 
@@ -1178,19 +1002,8 @@ def _ensure_workshop_master(kind):
 
 
 def _workshop_placement_z(kind, layer, on_solid=False):
-    """World Z for a placed component's origin.
-
-    Buttons are overlays: when a tile-filling solid (block/wall/ramp) occupies
-    the cell the button rests on that tile's top face (`on_solid`); otherwise it
-    sits flush on the layer's floor (so a layer-0 button is level with the
-    ground, not floating at cube-top height).
-    """
-    z = float(layer)
-    if kind == "BUTTON":
-        z += WS_BUTTON_HEIGHT / 2.0
-        if on_solid:
-            z += WS_TILE_TOP
-    return z
+    """World Z for a placed component's origin (see snaked_common.placement_z)."""
+    return sc.placement_z(kind, layer, on_solid=on_solid)
 
 
 # ---------------------------------------------------------------------------
@@ -1206,75 +1019,74 @@ def _ws_component_name(kind, x, y, layer, rotation, name_id):
     return "WS_%s_x%d_y%d_z%d" % (kind.title(), x, y, layer)
 
 
-def _iter_workshop_components_at(x, y, layer):
-    """Yield placed component objects sitting at the given grid cell."""
-    import bpy
-    coll = bpy.data.collections.get(WORKSHOP_COMPONENTS_COLLECTION)
-    if coll is None:
-        return
-    for obj in list(coll.objects):
-        if (obj.get("snaked_x") == x
-                and obj.get("snaked_y") == y
-                and obj.get("snaked_z") == layer):
-            yield obj
-
-
 # Tile-filling solids: a button placed on such a cell rests on the tile's top.
-_SOLID_KINDS = {"BLOCK", "WALL", "RAMP"}
+_SOLID_KINDS = sc.SOLID_KINDS
 
 
-def _solid_at(x, y, layer):
-    """True if a tile-filling solid (block/wall/ramp) occupies the cell."""
-    for obj in _iter_workshop_components_at(x, y, layer):
-        if obj.get("snaked_component") in _SOLID_KINDS:
-            return True
-    return False
+class _ComponentIndex(sc.ComponentIndex):
+    """Occupancy index over the workshop's components collection.
+
+    See snaked_common.ComponentIndex: build one per operation -- or one per
+    *batch* for the fill operators -- so each cell query is a dict lookup
+    instead of a scan of the whole components collection. Instanced fills are
+    expanded into read-only solid occupancy.
+    """
+
+    def __init__(self):
+        super().__init__(WORKSHOP_COMPONENTS_COLLECTION)
 
 
-def erase_workshop_component(x, y, layer, only_kinds=None):
+def erase_workshop_component(x, y, layer, only_kinds=None, occ=None):
     """Remove placed component(s) at the cell. Guide zones and masters are never
-    touched -- we only look inside the components collection and only remove
-    objects tagged as placed components.
+    touched -- the occupancy index only ever contains objects tagged as placed
+    components, so nothing else can be removed.
 
     With `only_kinds` given, removes just components of those kinds, so a button
     overlay and the solid beneath it can be replaced independently. With no
     filter (the Erase tool) every component at the cell is removed.
+
+    `occ` is an optional shared _ComponentIndex: batch callers build one index
+    up front and pass it through so each erase is a dict lookup instead of a
+    full collection scan. Without it a fresh index is built for this call.
     """
-    import bpy
+    if occ is None:
+        occ = _ComponentIndex()
     removed = 0
-    for obj in _iter_workshop_components_at(x, y, layer):
-        if "snaked_component" not in obj:
-            continue   # safety: never remove anything we did not place
+    for obj in occ.at(x, y, layer):
         if only_kinds is not None and obj["snaked_component"] not in only_kinds:
             continue
-        mesh = obj.data if obj.type == 'MESH' else None
-        bpy.data.objects.remove(obj, do_unlink=True)
-        # Mesh data is shared with the master, so it normally survives; only
-        # remove it if it has become an orphan.
-        if mesh is not None and mesh.users == 0:
-            bpy.data.meshes.remove(mesh)
+        occ.discard(obj)
+        # Mesh data shared with the master survives; orphans are freed.
+        sc.remove_object_with_orphan_data(obj)
         removed += 1
     return removed
 
 
-def place_workshop_component(kind, x, y, layer, rotation=0, name_id=""):
+def place_workshop_component(kind, x, y, layer, rotation=0, name_id="", occ=None):
     """Place a component as a linked-duplicate of its master asset.
 
     Any existing component at the same cell is erased first so placement
     overwrites cleanly (same behaviour as snaked_tools).
+
+    `occ` is an optional shared _ComponentIndex (see erase_workshop_component):
+    batch callers pass one so every cell query here is a dict lookup; the index
+    is kept up to date as this function erases and places.
     """
     import bpy
     import math
 
+    if occ is None:
+        occ = _ComponentIndex()
+
     if kind == "BUTTON":
         # Buttons are overlays -- only replace an existing button, never the
         # solid/floor they sit on (so a button on a square keeps the square).
-        erase_workshop_component(x, y, layer, only_kinds={"BUTTON"})
+        erase_workshop_component(x, y, layer, only_kinds={"BUTTON"}, occ=occ)
     else:
         # Tile-filling components are mutually exclusive; replace any other
         # solid/floor but keep a button overlay sitting on this cell.
         erase_workshop_component(
-            x, y, layer, only_kinds={"FLOOR", "BLOCK", "WALL", "RAMP"})
+            x, y, layer, only_kinds={"FLOOR", "BLOCK", "WALL", "RAMP"}, occ=occ)
 
     master = _ensure_workshop_master(kind)
     obj = bpy.data.objects.new(
@@ -1283,7 +1095,7 @@ def place_workshop_component(kind, x, y, layer, rotation=0, name_id=""):
     )
     obj.location = (float(x), float(y),
                     _workshop_placement_z(kind, layer,
-                                          on_solid=_solid_at(x, y, layer)))
+                                          on_solid=occ.solid_at(x, y, layer)))
     obj.rotation_euler = (0.0, 0.0, math.radians(rotation))
 
     # Tag so erase can find it and never confuse it with a guide or a master.
@@ -1303,11 +1115,12 @@ def place_workshop_component(kind, x, y, layer, rotation=0, name_id=""):
 
     coll = _get_or_create_collection(WORKSHOP_COMPONENTS_COLLECTION)
     coll.objects.link(obj)
+    occ.add(obj)   # after tagging: the index keys off the snaked_* properties
 
     # If we just placed a solid beneath an existing button overlay, lift that
     # button onto the new tile's top so it isn't left buried inside the solid.
     if kind in _SOLID_KINDS:
-        for b in _iter_workshop_components_at(x, y, layer):
+        for b in occ.at(x, y, layer):
             if b is not obj and b.get("snaked_component") == "BUTTON":
                 b.location.z = _workshop_placement_z(
                     "BUTTON", layer, on_solid=True)
@@ -1396,7 +1209,9 @@ def tag_untagged_components():
     if coll is None:
         return tagged
     for obj in coll.objects:
-        if "snaked_component" not in obj or "snaked_area" in obj:
+        if "snaked_component" not in obj and "snaked_instance" not in obj:
+            continue   # not something we placed (loose comp or instanced fill)
+        if "snaked_area" in obj:
             continue
         x, y = obj.get("snaked_x"), obj.get("snaked_y")
         if x is None or y is None:
@@ -1419,7 +1234,9 @@ def sync_components_to_layout():
     if coll is None:
         return moved
     for obj in coll.objects:
-        if "snaked_component" not in obj or "snaked_area" not in obj:
+        if "snaked_component" not in obj and "snaked_instance" not in obj:
+            continue   # not something we placed (loose comp or instanced fill)
+        if "snaked_area" not in obj:
             continue
         entry = _AREA_BOUNDS.get(obj["snaked_area"])
         if entry is None:
@@ -1621,7 +1438,9 @@ def _capture_cell_components(x0, y0, x1, y1):
 
     Reads the components we placed (snaked_x/y/z), returning them with (x, y)
     made relative to the cell's low corner so they can be transformed and
-    re-stamped anywhere.
+    re-stamped anywhere. Instanced fills are captured too: the piece is read
+    straight off the instance's prototype objects, offset to its anchor, so a
+    cell filled as an instance captures identically to a loose fill.
     """
     import bpy
     import math
@@ -1650,6 +1469,31 @@ def _capture_cell_components(x0, y0, x1, y1):
             "rotation": int(rrot) % 360,
             "id": obj.get("snaked_id", ""),
         })
+    # Instanced fills anchored in the cell: emit their prototype's components
+    # (tagged with cell-relative coords) offset by the instance's anchor.
+    for obj in coll.objects:
+        if "snaked_instance" not in obj:
+            continue
+        ax, ay = obj.get("snaked_x"), obj.get("snaked_y")
+        proto = obj.instance_collection
+        if ax is None or ay is None or proto is None:
+            continue
+        if not (x0 <= ax <= x1 and y0 <= ay <= y1):
+            continue
+        for src in proto.objects:
+            if "snaked_component" not in src:
+                continue
+            rrot = src.get("snaked_rot")
+            if rrot is None:
+                rrot = int(round(math.degrees(src.rotation_euler.z)))
+            comps.append({
+                "kind": src["snaked_component"],
+                "x": int(ax - x0 + src.get("snaked_x", 0)),
+                "y": int(ay - y0 + src.get("snaked_y", 0)),
+                "layer": int(src.get("snaked_z", 0)),
+                "rotation": int(rrot) % 360,
+                "id": src.get("snaked_id", ""),
+            })
     return comps
 
 
@@ -1678,13 +1522,7 @@ def clear_orientations(shape=None):
     for obj in list(coll.objects):
         if shape is not None and obj.get("snaked_orient_shape") != shape:
             continue
-        data = obj.data if obj.type in {'MESH', 'FONT'} else None
-        bpy.data.objects.remove(obj, do_unlink=True)
-        if data is not None and data.users == 0:
-            if isinstance(data, bpy.types.Mesh):
-                bpy.data.meshes.remove(data)
-            elif isinstance(data, bpy.types.Curve):
-                bpy.data.curves.remove(data)
+        sc.remove_object_with_orphan_data(obj)
 
 
 def _orient_border(builder, x0, y0, x1, y1):
@@ -1780,14 +1618,16 @@ def generate_ramp_puzzle_orientations(shape, components, root):
     stride = RAMP_CELL + RAMP_CELL_GAP
     y0 = RAMP_ORIENT_AREA_ORIGIN_Y + row * stride
 
-    # Shape name to the left of its row of orientation cells.
-    _orient_label(coll, shape, shape,
-                  RAMP_ORIENT_AREA_ORIGIN_X - 6.0, y0 + 0.5, size=1.3)
-
-    # All of this row's cell borders merge into ONE guide mesh object, tagged
-    # with the shape so clear_orientations(shape) still removes just this row.
+    # All of this row's cell borders AND labels merge into ONE guide mesh
+    # object, tagged with the shape so clear_orientations(shape) still removes
+    # just this row.
     guide = _GuideMeshBuilder(
         "WS_OrientGuide_%s" % shape.replace(" ", "_"))
+
+    # Shape name to the left of its row of orientation cells.
+    _add_label(guide, shape,
+               RAMP_ORIENT_AREA_ORIGIN_X - 6.0, y0 + 0.5, RAMP_ACCENT,
+               size=1.3)
 
     pieces = []
     for col, (rotation, mirrored) in enumerate(orients):
@@ -1797,8 +1637,8 @@ def generate_ramp_puzzle_orientations(shape, components, root):
         x0 = RAMP_ORIENT_AREA_ORIGIN_X + col * stride
         x1, y1 = x0 + RAMP_CELL - 1, y0 + RAMP_CELL - 1
         _orient_border(guide, x0, y0, x1, y1)
-        _orient_label(coll, shape, "%s %s" % (shape, meta["label"]),
-                      x0 - 0.5, y1 + 0.6, size=1.0)
+        _add_label(guide, "%s %s" % (shape, meta["label"]),
+                   x0 - 0.5, y1 + 0.6, RAMP_ACCENT, size=1.0)
 
         # Cells filled by a solid, so any button stamped there rests on top.
         solid_cells = {(c["x"], c["y"], c.get("layer", 0)) for c in variant
@@ -1843,7 +1683,7 @@ def _ramps_and_blocks(components):
     return [c for c in components if c.get("kind") in _FILL_KINDS]
 
 
-def fill_ramp_wall_cell(index, components):
+def fill_ramp_wall_cell(index, components, occ=None, instanced=False):
     """Place `components` inside the ramps+walls cell at `index`.
 
     `components` are cell-relative ramp/block dicts (from a ramp-puzzle capture).
@@ -1851,11 +1691,18 @@ def fill_ramp_wall_cell(index, components):
     cell, then placed as standard, editable workshop components. Standard cells
     centre the piece vertically too; oversized (overridden) cells anchor it to the
     bottom instead, so the cell's extra height becomes clear rows on top -- room
-    to add walls above the piece. Returns the count placed.
+    to add walls above the piece. Returns the count placed (or represented).
+
+    `occ` is an optional shared _ComponentIndex; batch callers pass one so the
+    whole fill runs off a single collection scan. With `instanced` True the
+    cell gets ONE collection-instance object showing the piece instead of
+    loose components (make_cell_editable() explodes it back for editing).
     """
     base = _transform_piece(components, 0, False)   # normalise, original facing
     if not base:
         return 0
+    if occ is None:
+        occ = _ComponentIndex()
     shape, letter, _col, _row = RAMP_WALL_CELLS[index]
     x0, y0, _x1, _y1 = _ramp_wall_bounds(index)
     size = _ramp_wall_cell_size(shape, letter)
@@ -1864,25 +1711,31 @@ def fill_ramp_wall_cell(index, components):
     # Oversized cells: anchor to the bottom so the spare rows land on top.
     is_oversized = (shape, letter) in RAMP_WALL_CELL_OVERRIDES
     oy = 0 if is_oversized else max(0, (size - h) // 2)
+    if instanced:
+        _instance_piece("rw_src_%s" % shape, base, x0 + ox, y0 + oy,
+                        "rw_%s_%s" % (shape, letter), occ)
+        return len(base)
     for c in base:
         place_workshop_component(
             c["kind"], x0 + ox + c["x"], y0 + oy + c["y"], c.get("layer", 0),
-            rotation=c.get("rotation", 0), name_id=c.get("id", ""),
+            rotation=c.get("rotation", 0), name_id=c.get("id", ""), occ=occ,
         )
     return len(base)
 
 
-def fill_ramp_wall_cells_from_ramps():
+def fill_ramp_wall_cells_from_ramps(instanced=False):
     """Seed every ramps+walls cell with its shape's authored ramp puzzle.
 
     Captures each ramp puzzle once (ramps + blocks, original orientation) and
-    stamps it into the centre of every lettered cell for that shape. Returns
-    (cells_filled, [shapes_skipped]) -- a shape is skipped when its ramp puzzle
-    has not been authored yet.
+    stamps it into the centre of every lettered cell for that shape. With
+    `instanced` True each cell gets one collection-instance object instead of
+    loose components. Returns (cells_filled, [shapes_skipped]) -- a shape is
+    skipped when its ramp puzzle has not been authored yet.
     """
     cache = {}
     filled = 0
     skipped = set()
+    occ = _ComponentIndex()   # one scan shared by every placement below
     for index, (shape, _letter, _col, _row) in enumerate(RAMP_WALL_CELLS):
         if shape not in cache:
             cache[shape] = _ramps_and_blocks(
@@ -1891,47 +1744,62 @@ def fill_ramp_wall_cells_from_ramps():
         if not comps:
             skipped.add(shape)
             continue
-        fill_ramp_wall_cell(index, comps)
+        fill_ramp_wall_cell(index, comps, occ=occ, instanced=instanced)
         filled += 1
     return filled, sorted(skipped)
 
 
-def fill_ramp_wall_button_cell(index, components):
+def fill_ramp_wall_button_cell(index, components, occ=None, instanced=False):
     """Place `components` inside the ramps+walls+buttons cell at `index`.
 
     Mirrors fill_ramp_wall_cell: normalise to the piece bbox, centre it in the
     cell (oversized cells anchor to the bottom so spare rows land on top), and
-    place as standard, editable workshop components. Returns the count placed.
+    place as standard, editable workshop components -- or, with `instanced`
+    True, as ONE collection-instance object showing the piece. Returns the
+    count placed (or represented).
+
+    `occ` is an optional shared _ComponentIndex; batch callers pass one so the
+    whole fill runs off a single collection scan.
     """
     base = _transform_piece(components, 0, False)   # normalise, original facing
     if not base:
         return 0
-    shape, letter, _number, _col, _row = RAMP_WALL_BUTTON_CELLS[index]
+    if occ is None:
+        occ = _ComponentIndex()
+    shape, letter, number, _col, _row = RAMP_WALL_BUTTON_CELLS[index]
     x0, y0, _x1, _y1 = _ramp_wall_button_bounds(index)
     size = _ramp_wall_button_cell_size(shape, letter)
     w, h, _layers = _piece_grid_size(base)
     ox = max(0, (size - w) // 2)
     is_oversized = (shape, letter) in RAMP_WALL_CELL_OVERRIDES
     oy = 0 if is_oversized else max(0, (size - h) // 2)
+    if instanced:
+        _instance_piece("rwb_src_%s_%s" % (shape, letter), base,
+                        x0 + ox, y0 + oy,
+                        "rwb_%s_%s_%d" % (shape, letter, number), occ)
+        return len(base)
     for c in base:
         place_workshop_component(
             c["kind"], x0 + ox + c["x"], y0 + oy + c["y"], c.get("layer", 0),
-            rotation=c.get("rotation", 0), name_id=c.get("id", ""),
+            rotation=c.get("rotation", 0), name_id=c.get("id", ""), occ=occ,
         )
     return len(base)
 
 
-def fill_ramp_wall_button_cells_from_ramp_walls():
+def fill_ramp_wall_button_cells_from_ramp_walls(instanced=False):
     """Import every ramps+walls piece into its numbered button cells.
 
     Captures each ramps+walls cell once (all components, original orientation)
     and stamps it into all RAMP_WALL_BUTTON_VARIATIONS numbered cells for that
-    (shape, letter). Empty sources are left blank so you can delete the empties
-    later. Returns (cells_filled, [(shape, letter), ...] for empty sources).
+    (shape, letter). With `instanced` True each cell gets one collection-
+    instance object instead of loose components. Empty sources are left blank
+    so you can delete the empties later. Returns (cells_filled,
+    [(shape, letter), ...] for empty sources).
     """
     cache = {}
     filled = 0
     empty = set()
+    occ = _ComponentIndex()   # one scan shared by every placement below
     for index, (shape, letter, _num, _col, _row) in enumerate(RAMP_WALL_BUTTON_CELLS):
         key = (shape, letter)
         if key not in cache:
@@ -1940,9 +1808,248 @@ def fill_ramp_wall_button_cells_from_ramp_walls():
         if not comps:
             empty.add(key)
             continue
-        fill_ramp_wall_button_cell(index, comps)
+        fill_ramp_wall_button_cell(index, comps, occ=occ, instanced=instanced)
         filled += 1
     return filled, sorted(empty)
+
+
+# ---------------------------------------------------------------------------
+# Instanced fills: ONE collection-instance object per filled cell
+# ---------------------------------------------------------------------------
+# A fill used to stamp every component of the imported piece as its own
+# object, so 204 button cells x ~15 components meant thousands of objects and
+# a crawling viewport. Instanced fills build one hidden prototype collection
+# per SOURCE piece and drop a single collection-instance empty per cell
+# instead -- same look, a fraction of the objects. Capture reads straight
+# through instances (so "Save Cell as Piece" and the button-cell import still
+# work), and make_cell_editable() explodes a cell's instance back into
+# ordinary editable components when you want to change that variation.
+
+WORKSHOP_PROTO_PREFIX = "WS_PieceProto_"
+
+
+def _area_cell_bounds(area, zone_i=0, ramp_i=0, rw_i=0, rwb_i=0):
+    """Inclusive (x0, y0, x1, y1) of the selected cell in any area."""
+    if area == "RAMP":
+        return _ramp_puzzle_bounds(ramp_i)
+    if area == "RAMPWALL":
+        return _ramp_wall_bounds(rw_i)
+    if area == "RAMPWALLBUTTON":
+        return _ramp_wall_button_bounds(rwb_i)
+    return _zone_bounds(zone_i)
+
+
+def _ensure_piece_proto(key, components):
+    """(Re)build the hidden prototype collection for one source piece.
+
+    `components` are piece-relative dicts (already normalised to (0, 0)). The
+    collection is deliberately NOT linked into the scene: only its instances
+    are visible (it is still saved in the .blend, referenced by them). It is
+    rebuilt on every call so re-filling always instances the source's current
+    state. Proto objects carry the same snaked_* tags as placed components --
+    with cell-RELATIVE coords -- so capture and explode read the piece
+    straight off them.
+    """
+    import bpy
+    import math
+    name = WORKSHOP_PROTO_PREFIX + _slug(key)
+    coll = bpy.data.collections.get(name)
+    if coll is None:
+        coll = bpy.data.collections.new(name)
+    else:
+        for obj in list(coll.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    solid_cells = {(c["x"], c["y"], c.get("layer", 0)) for c in components
+                   if c.get("kind") in _SOLID_KINDS}
+    for c in components:
+        kind = c["kind"]
+        master = _ensure_workshop_master(kind)
+        obj = bpy.data.objects.new(
+            "Proto_%s_%s" % (_slug(key), kind.title()), master.data)
+        on_solid = (kind == "BUTTON"
+                    and (c["x"], c["y"], c.get("layer", 0)) in solid_cells)
+        obj.location = (float(c["x"]), float(c["y"]),
+                        _workshop_placement_z(kind, c.get("layer", 0),
+                                              on_solid=on_solid))
+        obj.rotation_euler = (0.0, 0.0, math.radians(c.get("rotation", 0)))
+        obj["snaked_component"] = kind
+        obj["snaked_x"] = int(c["x"])
+        obj["snaked_y"] = int(c["y"])
+        obj["snaked_z"] = int(c.get("layer", 0))
+        if kind == "RAMP":
+            obj["snaked_rot"] = int(c.get("rotation", 0)) % 360
+        if kind == "BUTTON" and c.get("id"):
+            obj["snaked_id"] = c["id"]
+        coll.objects.link(obj)
+    return coll
+
+
+def _instance_piece(proto_key, components, anchor_x, anchor_y, cell_tag, occ):
+    """Drop one collection-instance empty showing `components` at the anchor.
+
+    Overwrite semantics match a loose fill: loose components occupying the
+    piece's target cells are erased first (buttons only clear buttons; solids
+    clear solids/floors), and a previous instance with the same cell_tag is
+    replaced. Returns the instance empty.
+    """
+    import bpy
+    proto = _ensure_piece_proto(proto_key, components)
+
+    # Clear what a loose fill would have overwritten.
+    for c in components:
+        cx = int(anchor_x) + c["x"]
+        cy = int(anchor_y) + c["y"]
+        cl = c.get("layer", 0)
+        if c["kind"] == "BUTTON":
+            erase_workshop_component(cx, cy, cl, only_kinds={"BUTTON"},
+                                     occ=occ)
+        else:
+            erase_workshop_component(
+                cx, cy, cl, only_kinds={"FLOOR", "BLOCK", "WALL", "RAMP"},
+                occ=occ)
+
+    name = "WS_Fill_" + _slug(cell_tag)
+    old = bpy.data.objects.get(name)
+    if old is not None and "snaked_instance" in old:
+        bpy.data.objects.remove(old, do_unlink=True)
+
+    empty = bpy.data.objects.new(name, None)
+    empty.empty_display_size = 0.4
+    empty.instance_type = 'COLLECTION'
+    empty.instance_collection = proto
+    empty.location = (float(anchor_x), float(anchor_y), 0.0)
+    empty["snaked_instance"] = proto.name
+    empty["snaked_x"] = int(anchor_x)
+    empty["snaked_y"] = int(anchor_y)
+    _tag_home(empty, int(anchor_x), int(anchor_y))
+    _get_or_create_collection(WORKSHOP_COMPONENTS_COLLECTION).objects.link(empty)
+    occ.add_instance(empty)   # its solid cells count for later solid_at checks
+    return empty
+
+
+def make_cell_editable(area, zone_i=0, ramp_i=0, rw_i=0, rwb_i=0):
+    """Explode instanced fill(s) in the selected cell into loose components.
+
+    Every instance empty anchored inside the cell is replaced by ordinary
+    placed components (same kinds / positions / tags as a loose fill would
+    have made), so the regular Place / Erase tools work on the piece again.
+    Returns (instances_exploded, components_placed).
+    """
+    import bpy
+    import math
+    x0, y0, x1, y1 = _area_cell_bounds(area, zone_i, ramp_i, rw_i, rwb_i)
+    coll = bpy.data.collections.get(WORKSHOP_COMPONENTS_COLLECTION)
+    if coll is None:
+        return 0, 0
+    exploded = placed = 0
+    occ = _ComponentIndex()
+    for obj in list(coll.objects):
+        if "snaked_instance" not in obj:
+            continue
+        ax, ay = obj.get("snaked_x"), obj.get("snaked_y")
+        if ax is None or ay is None or not (x0 <= ax <= x1 and y0 <= ay <= y1):
+            continue
+        proto = obj.instance_collection
+        if proto is not None:
+            srcs = [s for s in proto.objects if "snaked_component" in s]
+            # Solids first so buttons land on their supporting tiles.
+            srcs.sort(key=lambda s: s["snaked_component"] == "BUTTON")
+            for src in srcs:
+                rrot = src.get("snaked_rot")
+                if rrot is None:
+                    rrot = int(round(math.degrees(src.rotation_euler.z)))
+                place_workshop_component(
+                    src["snaked_component"],
+                    int(ax) + int(src.get("snaked_x", 0)),
+                    int(ay) + int(src.get("snaked_y", 0)),
+                    int(src.get("snaked_z", 0)),
+                    rotation=int(rrot) % 360,
+                    name_id=src.get("snaked_id", ""), occ=occ)
+                placed += 1
+        bpy.data.objects.remove(obj, do_unlink=True)
+        exploded += 1
+    return exploded, placed
+
+
+# ---------------------------------------------------------------------------
+# Save any authored cell as a standalone puzzle piece (JSON)
+# ---------------------------------------------------------------------------
+# The orientation generator only exports ramp puzzles; this is the generic
+# path: capture whatever is inside the selected cell (any area), normalise it
+# to (0, 0), and save it as a one-piece family under snaked_assets/
+# puzzle_pieces/ -- registered in ai_data/all_puzzle_pieces.json, where the
+# level assembler (snaked_tools.py's "Pieces" box) picks it up.
+
+# Filename/id-safe slugs are shared (snaked_common).
+_slug = sc.slug
+
+
+# Area id -> (piece-id prefix, piece category). The RAMP prefix is 'ramp_base'
+# (not 'ramp_') so a captured base cell never collides with the orientation
+# generator's 'ramp_<shape>' family folders.
+_AREA_PIECE_INFO = {
+    "WORKBENCH": ("ws", "workbench"),
+    "RAMP": ("ramp_base", "ramp_puzzle"),
+    "RAMPWALL": ("rw", "ramp_wall"),
+    "RAMPWALLBUTTON": ("rwb", "ramp_wall_button"),
+}
+
+
+def _piece_cell_label(area, zone_i, ramp_i, rw_i, rwb_i):
+    """Human-readable label of the selected cell, e.g. 'Cube b' / 'Fish a 3'."""
+    if area == "RAMP":
+        return RAMP_PUZZLES[ramp_i]
+    if area == "RAMPWALL":
+        shape, letter, _c, _r = RAMP_WALL_CELLS[rw_i]
+        return "%s %s" % (shape, letter)
+    if area == "RAMPWALLBUTTON":
+        shape, letter, number, _c, _r = RAMP_WALL_BUTTON_CELLS[rwb_i]
+        return "%s %s %d" % (shape, letter, number)
+    return ZONES[zone_i]
+
+
+def save_cell_as_piece(area, zone_i=0, ramp_i=0, rw_i=0, rwb_i=0,
+                       custom_id="", root=None):
+    """Capture one authored cell and save it as a standalone piece.
+
+    Writes snaked_assets/puzzle_pieces/<id>/family.json + piece_base.json and
+    registers the piece in ai_data/all_puzzle_pieces.json. With `custom_id`
+    given, that (slugged) id is used; otherwise the id is derived from the
+    area + cell label (e.g. 'rw_cube_b'). Saving the same cell (or id) again
+    overwrites the previous save -- it's a save operation.
+
+    Returns (piece_id, component_count); (None, 0) when the cell is empty.
+    """
+    bounds = _area_cell_bounds(area, zone_i, ramp_i, rw_i, rwb_i)
+    comps = _capture_cell_components(*bounds)
+    if not comps:
+        return None, 0
+    comps = _transform_piece(comps, 0, False)   # re-pack to (0, 0)
+
+    label = _piece_cell_label(area, zone_i, ramp_i, rw_i, rwb_i)
+    prefix, category = _AREA_PIECE_INFO.get(area, ("ws", "workbench"))
+    fid = _slug(custom_id) or "%s_%s" % (prefix, _slug(label))
+    pid = fid + "_base"
+    root = root or resolve_project_root()
+
+    meta = {"tag": "base", "label": "base", "vtype": "base",
+            "notes": "Captured from the workshop cell '%s'." % label,
+            "is_base": True, "index": 0}
+    piece = _build_piece_dict(pid, fid, label, meta, comps, pid)
+    piece["name"] = label
+    piece["category"] = category
+    piece["tags"] = [category, _slug(label)]
+
+    family = _build_family_dict(fid, label, pid, [])
+    family["core_idea"] = "Workshop capture '%s'." % label
+    family["main_mechanics"] = sorted({(c.get("kind") or "").lower()
+                                       for c in comps})
+    family["tags"] = piece["tags"]
+
+    _write_family_files(root, fid, family, [piece])
+    _register_pieces_in_index(root, family, [piece])
+    return pid, len(comps)
 
 
 # ---------------------------------------------------------------------------
@@ -2070,6 +2177,20 @@ if _bpy is not None:
             description="Generate orientations for every authored ramp puzzle",
             default=False,
         )
+        piece_id: _bpy.props.StringProperty(
+            name="Piece ID",
+            description="Optional id for 'Save Cell as Piece' (blank: derived "
+                        "from the selected cell, e.g. rw_cube_b)",
+            default="",
+        )
+        fill_instanced: _bpy.props.BoolProperty(
+            name="Fill as Instances",
+            description="Fill cells with ONE collection-instance object per "
+                        "piece instead of loose components (far fewer "
+                        "objects). Use 'Make Cell Editable' before editing a "
+                        "filled cell",
+            default=True,
+        )
 
     def _do_place(self, context, x, y, force_kind=None):
         p = context.scene.puzzle_workshop_tools
@@ -2189,7 +2310,9 @@ if _bpy is not None:
         bl_options = {'REGISTER', 'UNDO'}
 
         def execute(self, context):
-            filled, skipped = fill_ramp_wall_cells_from_ramps()
+            p = context.scene.puzzle_workshop_tools
+            filled, skipped = fill_ramp_wall_cells_from_ramps(
+                instanced=p.fill_instanced)
             if filled == 0:
                 self.report({'WARNING'},
                             "No authored ramp puzzles to fill from. Author them "
@@ -2215,7 +2338,9 @@ if _bpy is not None:
         bl_options = {'REGISTER', 'UNDO'}
 
         def execute(self, context):
-            filled, empty = fill_ramp_wall_button_cells_from_ramp_walls()
+            p = context.scene.puzzle_workshop_tools
+            filled, empty = fill_ramp_wall_button_cells_from_ramp_walls(
+                instanced=p.fill_instanced)
             if filled == 0:
                 self.report({'WARNING'},
                             "No authored ramps+walls pieces to import from. "
@@ -2228,6 +2353,56 @@ if _bpy is not None:
                 msg += " Empty source (left blank): %s." % ", ".join(
                     "%s %s" % (s, l) for s, l in empty)
             self.report({'INFO'}, msg)
+            return {'FINISHED'}
+
+    class PUZZLE_OT_make_editable(_bpy.types.Operator):
+        """Explode the selected cell's instanced fill into editable components.
+
+        The instance empty is replaced by ordinary placed components (same
+        positions and tags a loose fill would have made), so the regular
+        Place / Erase tools work on that cell's piece again.
+        """
+        bl_idname = "puzzle_workshop.make_editable"
+        bl_label = "Make Cell Editable"
+        bl_options = {'REGISTER', 'UNDO'}
+
+        def execute(self, context):
+            p = context.scene.puzzle_workshop_tools
+            exploded, placed = make_cell_editable(
+                p.area, int(p.zone), int(p.ramp_puzzle),
+                int(p.ramp_wall_puzzle), int(p.ramp_wall_button_puzzle))
+            if exploded == 0:
+                self.report({'WARNING'},
+                            "No instanced fill in the selected cell.")
+                return {'CANCELLED'}
+            self.report({'INFO'},
+                        "Exploded %d instance(s) into %d editable "
+                        "component(s)." % (exploded, placed))
+            return {'FINISHED'}
+
+    class PUZZLE_OT_save_piece(_bpy.types.Operator):
+        """Save the selected cell's components as a reusable piece JSON.
+
+        Captures whatever is placed inside the currently selected Area +
+        cell, saves it under snaked_assets/puzzle_pieces/ and registers it
+        in the piece index, where the main grid's "Pieces" box (Snaked
+        Tools panel) can stamp it onto a level.
+        """
+        bl_idname = "puzzle_workshop.save_piece"
+        bl_label = "Save Cell as Piece"
+
+        def execute(self, context):
+            p = context.scene.puzzle_workshop_tools
+            pid, n = save_cell_as_piece(
+                p.area, int(p.zone), int(p.ramp_puzzle),
+                int(p.ramp_wall_puzzle), int(p.ramp_wall_button_puzzle),
+                custom_id=p.piece_id.strip())
+            if pid is None:
+                self.report({'WARNING'},
+                            "Selected cell is empty -- nothing to save.")
+                return {'CANCELLED'}
+            self.report({'INFO'}, "Saved piece '%s' (%d components)."
+                        % (pid, n))
             return {'FINISHED'}
 
     class PUZZLE_OT_cull_hidden(_bpy.types.Operator):
@@ -2361,6 +2536,24 @@ if _bpy is not None:
             box2b.operator(PUZZLE_OT_fill_button_variations.bl_idname,
                            icon='PASTEDOWN')
 
+            # --- Instanced fills: fewer objects; explode a cell to edit ---
+            box2c = layout.box()
+            box2c.label(text="Instanced Fills",
+                        icon='OUTLINER_OB_GROUP_INSTANCE')
+            box2c.prop(p, "fill_instanced")
+            box2c.label(text="Instanced cells hold ONE object; explode a "
+                             "cell to edit it.", icon='INFO')
+            box2c.operator(PUZZLE_OT_make_editable.bl_idname,
+                           icon='OUTLINER_OB_MESH')
+
+            # --- Save the selected cell as a reusable piece ----------------
+            box_sp = layout.box()
+            box_sp.label(text="Save as Piece", icon='EXPORT')
+            box_sp.label(text="Saves the selected cell's components as a "
+                              "piece JSON.", icon='INFO')
+            box_sp.prop(p, "piece_id")
+            box_sp.operator(PUZZLE_OT_save_piece.bl_idname, icon='EXPORT')
+
             # --- Optimise geometry: delete buried interior faces ----------
             box3 = layout.box()
             box3.label(text="Optimise Geometry", icon='MOD_DECIM')
@@ -2376,6 +2569,8 @@ if _bpy is not None:
         PUZZLE_OT_generate_orientations,
         PUZZLE_OT_fill_variations,
         PUZZLE_OT_fill_button_variations,
+        PUZZLE_OT_make_editable,
+        PUZZLE_OT_save_piece,
         PUZZLE_OT_cull_hidden,
         PUZZLE_OT_restore_faces,
         PUZZLE_PT_tools,

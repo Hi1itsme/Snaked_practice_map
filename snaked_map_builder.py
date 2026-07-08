@@ -15,34 +15,53 @@ Run this from Blender's Text Editor (Alt+P) or via the command line:
     blender --python snaked_map_builder.py
 """
 
+import os
+import sys
+
 import bpy
-import math
+
+
+def _ensure_repo_on_path():
+    """Put this repo's folder on sys.path so `import snaked_common` works no
+    matter how the script is run (module import, blender --python, or the
+    Text Editor's Alt+P on a saved file)."""
+    dirs = []
+    try:
+        dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    try:
+        dirs.extend(
+            os.path.dirname(os.path.abspath(bpy.path.abspath(t.filepath)))
+            for t in bpy.data.texts if t.filepath)
+        if bpy.data.filepath:
+            dirs.append(os.path.dirname(bpy.data.filepath))
+    except Exception:
+        pass
+    dirs.append(os.getcwd())
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, "snaked_common.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            return
+
+
+_ensure_repo_on_path()
+
+import snaked_common as sc
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration  (grid dimensions live in snaked_common -- shared with the
+# tools panel so the two can never drift apart)
 # ---------------------------------------------------------------------------
 
 COLLECTION_NAME = "Snaked_Map"
-GRID_WIDTH = 22   # tiles along X
-GRID_HEIGHT = 40  # tiles along Y
+GRID_WIDTH = sc.GRID_WIDTH     # tiles along X
+GRID_HEIGHT = sc.GRID_HEIGHT   # tiles along Y
 
 # Layers stacked along Z. Layer 0 is the floor; layers 1..3 hold obstacles.
-NUM_LAYERS = 4       # 1 floor + 3 obstacle layers
-LAYER_HEIGHT = 1.0   # Z distance between layers (1 unit == 1 tile)
-
-
-# ---------------------------------------------------------------------------
-# Material helpers
-# ---------------------------------------------------------------------------
-
-def _get_material(name, color):
-    """Return a material with the given name, creating it if needed."""
-    mat = bpy.data.materials.get(name)
-    if mat is None:
-        mat = bpy.data.materials.new(name=name)
-        mat.use_nodes = False
-    mat.diffuse_color = (color[0], color[1], color[2], 1.0)
-    return mat
+NUM_LAYERS = sc.NUM_LAYERS       # 1 floor + 3 obstacle layers
+LAYER_HEIGHT = sc.LAYER_HEIGHT   # Z distance between layers (1 unit == 1 tile)
 
 
 # ---------------------------------------------------------------------------
@@ -65,83 +84,19 @@ def clear_map():
         return
 
     for obj in list(coll.objects):
-        mesh = obj.data if obj.type == 'MESH' else None
-        bpy.data.objects.remove(obj, do_unlink=True)
-        if mesh is not None and mesh.users == 0:
-            bpy.data.meshes.remove(mesh)
+        sc.remove_object_with_orphan_data(obj)
 
 
 def _link_to_map(obj):
     """Unlink an object from any other collection and place it in the map collection."""
-    coll = get_map_collection()
-    for c in list(obj.users_collection):
-        c.objects.unlink(obj)
-    coll.objects.link(obj)
+    sc.link_to_collection(obj, get_map_collection())
 
 
 # ---------------------------------------------------------------------------
-# Geometry helper
+# Geometry helper (shared: see snaked_common.GuideMeshBuilder)
 # ---------------------------------------------------------------------------
 
-class _GuideMeshBuilder:
-    """Accumulates axis-aligned boxes and emits them all as ONE mesh object.
-
-    The grid used to be one object -- with its own mesh datablock, created via
-    a bpy.ops call -- per line segment, which meant hundreds of objects and a
-    slow rebuild. Boxes added here become faces of a single shared mesh
-    instead; colours are kept via one material slot per (name, colour) and
-    per-face material indices.
-    """
-
-    # Standard cube faces over the 8 corner verts emitted by add_box.
-    _FACES = (
-        (0, 3, 2, 1), (4, 5, 6, 7),   # bottom, top
-        (0, 1, 5, 4), (1, 2, 6, 5),   # -Y, +X
-        (2, 3, 7, 6), (3, 0, 4, 7),   # +Y, -X
-    )
-
-    def __init__(self, name):
-        self.name = name
-        self.verts = []
-        self.faces = []
-        self.face_mats = []
-        self.mats = []           # (mat_name, color) in material-slot order
-        self._slot_by_name = {}
-
-    def _mat_slot(self, name, color):
-        slot = self._slot_by_name.get(name)
-        if slot is None:
-            slot = len(self.mats)
-            self._slot_by_name[name] = slot
-            self.mats.append((name, color))
-        return slot
-
-    def add_box(self, location, size, mat_name, color):
-        """Append a box with explicit per-axis dimensions, centred on location."""
-        cx, cy, cz = location
-        hx, hy, hz = size[0] / 2.0, size[1] / 2.0, size[2] / 2.0
-        base = len(self.verts)
-        self.verts.extend((
-            (cx - hx, cy - hy, cz - hz), (cx + hx, cy - hy, cz - hz),
-            (cx + hx, cy + hy, cz - hz), (cx - hx, cy + hy, cz - hz),
-            (cx - hx, cy - hy, cz + hz), (cx + hx, cy - hy, cz + hz),
-            (cx + hx, cy + hy, cz + hz), (cx - hx, cy + hy, cz + hz),
-        ))
-        slot = self._mat_slot(mat_name, color)
-        for f in self._FACES:
-            self.faces.append((base + f[0], base + f[1],
-                               base + f[2], base + f[3]))
-            self.face_mats.append(slot)
-
-    def build(self):
-        """Create and return the merged mesh object (not linked anywhere yet)."""
-        mesh = bpy.data.meshes.new(self.name)
-        mesh.from_pydata(self.verts, [], self.faces)
-        for name, color in self.mats:
-            mesh.materials.append(_get_material(name, color))
-        mesh.polygons.foreach_set("material_index", self.face_mats)
-        mesh.update()
-        return bpy.data.objects.new(self.name, mesh)
+_GuideMeshBuilder = sc.GuideMeshBuilder
 
 
 # ---------------------------------------------------------------------------
