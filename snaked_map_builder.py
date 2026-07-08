@@ -15,40 +15,53 @@ Run this from Blender's Text Editor (Alt+P) or via the command line:
     blender --python snaked_map_builder.py
 """
 
+import os
+import sys
+
 import bpy
-import math
+
+
+def _ensure_repo_on_path():
+    """Put this repo's folder on sys.path so `import snaked_common` works no
+    matter how the script is run (module import, blender --python, or the
+    Text Editor's Alt+P on a saved file)."""
+    dirs = []
+    try:
+        dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    try:
+        dirs.extend(
+            os.path.dirname(os.path.abspath(bpy.path.abspath(t.filepath)))
+            for t in bpy.data.texts if t.filepath)
+        if bpy.data.filepath:
+            dirs.append(os.path.dirname(bpy.data.filepath))
+    except Exception:
+        pass
+    dirs.append(os.getcwd())
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, "snaked_common.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            return
+
+
+_ensure_repo_on_path()
+
+import snaked_common as sc
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration  (grid dimensions live in snaked_common -- shared with the
+# tools panel so the two can never drift apart)
 # ---------------------------------------------------------------------------
 
 COLLECTION_NAME = "Snaked_Map"
-GRID_WIDTH = 22   # tiles along X
-GRID_HEIGHT = 40  # tiles along Y
+GRID_WIDTH = sc.GRID_WIDTH     # tiles along X
+GRID_HEIGHT = sc.GRID_HEIGHT   # tiles along Y
 
 # Layers stacked along Z. Layer 0 is the floor; layers 1..3 hold obstacles.
-NUM_LAYERS = 4       # 1 floor + 3 obstacle layers
-LAYER_HEIGHT = 1.0   # Z distance between layers (1 unit == 1 tile)
-
-
-# ---------------------------------------------------------------------------
-# Material helpers
-# ---------------------------------------------------------------------------
-
-def _get_material(name, color):
-    """Return a material with the given name, creating it if needed."""
-    mat = bpy.data.materials.get(name)
-    if mat is None:
-        mat = bpy.data.materials.new(name=name)
-        mat.use_nodes = False
-    mat.diffuse_color = (color[0], color[1], color[2], 1.0)
-    return mat
-
-
-def _apply_material(obj, name, color):
-    mat = _get_material(name, color)
-    obj.data.materials.clear()
-    obj.data.materials.append(mat)
+NUM_LAYERS = sc.NUM_LAYERS       # 1 floor + 3 obstacle layers
+LAYER_HEIGHT = sc.LAYER_HEIGHT   # Z distance between layers (1 unit == 1 tile)
 
 
 # ---------------------------------------------------------------------------
@@ -71,40 +84,27 @@ def clear_map():
         return
 
     for obj in list(coll.objects):
-        mesh = obj.data if obj.type == 'MESH' else None
-        bpy.data.objects.remove(obj, do_unlink=True)
-        if mesh is not None and mesh.users == 0:
-            bpy.data.meshes.remove(mesh)
+        sc.remove_object_with_orphan_data(obj)
 
 
 def _link_to_map(obj):
     """Unlink an object from any other collection and place it in the map collection."""
-    coll = get_map_collection()
-    for c in list(obj.users_collection):
-        c.objects.unlink(obj)
-    coll.objects.link(obj)
+    sc.link_to_collection(obj, get_map_collection())
 
 
 # ---------------------------------------------------------------------------
-# Geometry helper
+# Geometry helper (shared: see snaked_common.GuideMeshBuilder)
 # ---------------------------------------------------------------------------
 
-def _add_box(name, location, size):
-    """Create a box (cube) mesh object with explicit per-axis dimensions."""
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
-    obj = bpy.context.active_object
-    obj.name = name
-    obj.scale = (size[0], size[1], size[2])
-    _link_to_map(obj)
-    return obj
+_GuideMeshBuilder = sc.GuideMeshBuilder
 
 
 # ---------------------------------------------------------------------------
 # Visible grid
 # ---------------------------------------------------------------------------
 
-def _create_grid_layer(width, height, layer, z):
-    """Draw a single flat width x height grid at height z (layer index for naming)."""
+def _create_grid_layer(builder, width, height, layer, z):
+    """Add a single flat width x height grid at height z to the guide builder."""
     line_thickness = 0.02
 
     # The floor layer is brighter; obstacle layers are dimmer.
@@ -123,23 +123,15 @@ def _create_grid_layer(width, height, layer, z):
 
     # Lines parallel to Y (varying X position).
     for i in range(width + 1):
-        x = x_lo + i
-        obj = _add_box(
-            "Grid_L%d_LineY_%02d" % (layer, i),
-            location=(x, y_center, z),
-            size=(line_thickness, y_span, line_thickness),
-        )
-        _apply_material(obj, mat_name, color)
+        builder.add_box((x_lo + i, y_center, z),
+                        (line_thickness, y_span, line_thickness),
+                        mat_name, color)
 
     # Lines parallel to X (varying Y position).
     for j in range(height + 1):
-        y = y_lo + j
-        obj = _add_box(
-            "Grid_L%d_LineX_%02d" % (layer, j),
-            location=(x_center, y, z),
-            size=(x_span, line_thickness, line_thickness),
-        )
-        _apply_material(obj, mat_name, color)
+        builder.add_box((x_center, y_lo + j, z),
+                        (x_span, line_thickness, line_thickness),
+                        mat_name, color)
 
 
 def create_grid(width=GRID_WIDTH, height=GRID_HEIGHT, num_layers=NUM_LAYERS):
@@ -147,11 +139,15 @@ def create_grid(width=GRID_WIDTH, height=GRID_HEIGHT, num_layers=NUM_LAYERS):
 
     Layer 0 (z=0) is the floor; layers 1..num_layers-1 are obstacle layers
     spaced LAYER_HEIGHT apart. Tiles are centered on integer coordinates
-    (0..width-1, 0..height-1) at each layer.
+    (0..width-1, 0..height-1) at each layer. Each layer's lines are merged
+    into ONE mesh object (Snaked_Grid_L<n>) so it can still be hidden per
+    layer without flooding the scene with per-line objects.
     """
     for layer in range(num_layers):
         z = layer * LAYER_HEIGHT
-        _create_grid_layer(width, height, layer, z)
+        builder = _GuideMeshBuilder("Snaked_Grid_L%d" % layer)
+        _create_grid_layer(builder, width, height, layer, z)
+        _link_to_map(builder.build())
 
 
 # ---------------------------------------------------------------------------

@@ -74,13 +74,45 @@ console.
 """
 
 import os
+import sys
 import json
+
+
+def _ensure_repo_on_path():
+    """Put this repo's folder on sys.path so `import snaked_common` works no
+    matter how the script is run (module import, blender --python, plain
+    python, or the Text Editor's Alt+P on a saved file)."""
+    dirs = []
+    try:
+        dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    try:
+        import bpy
+        dirs.extend(
+            os.path.dirname(os.path.abspath(bpy.path.abspath(t.filepath)))
+            for t in bpy.data.texts if t.filepath)
+        if bpy.data.filepath:
+            dirs.append(os.path.dirname(bpy.data.filepath))
+    except Exception:
+        pass
+    dirs.append(os.getcwd())
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, "snaked_common.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            return
+
+
+_ensure_repo_on_path()
+
+import snaked_common as sc
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-PROJECT_DIR_NAME = "Snaked_Project"     # shared root folder (made by the other scripts too)
+PROJECT_DIR_NAME = sc.PROJECT_DIR_NAME   # shared root folder name
 
 LEVELS_COLLECTION = "Snaked_Levels"     # top-level Blender collection for all levels
 
@@ -120,41 +152,10 @@ _ALL_LEVELS_TEMPLATE = {
 
 
 # ===========================================================================
-# Shared project-root resolution (same approach as puzzle_piece_workshop.py)
+# Shared project-root resolution (see snaked_common)
 # ===========================================================================
 
-def _base_dir():
-    """Best-effort folder to anchor the project root in.
-
-    Order of preference:
-      1. The saved .blend file's folder (when running inside Blender).
-      2. This script file's folder (saved .py / VS Code).
-      3. The current working directory.
-    """
-    try:
-        import bpy
-        if bpy.data.filepath:
-            return os.path.dirname(bpy.data.filepath)
-    except Exception:
-        pass
-    try:
-        return os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        return os.getcwd()
-
-
-def resolve_project_root():
-    """Return the absolute path of the Snaked_Project root.
-
-    If we're already running from somewhere inside an existing Snaked_Project
-    tree, reuse that root instead of nesting a second one.
-    """
-    base = os.path.normpath(_base_dir())
-    parts = base.split(os.sep)
-    if PROJECT_DIR_NAME in parts:
-        idx = len(parts) - 1 - parts[::-1].index(PROJECT_DIR_NAME)
-        return os.sep.join(parts[: idx + 1])
-    return os.path.join(base, PROJECT_DIR_NAME)
+resolve_project_root = sc.resolve_project_root
 
 
 # ===========================================================================
@@ -171,25 +172,11 @@ def _ai_data_dir(root):
     return os.path.join(root, "ai_data")
 
 
-def _world_folder_name(world_number):
-    """Zero-padded world folder name, e.g. 1 -> 'world_01'."""
-    return "world_%02d" % int(world_number)
-
-
-def _level_folder_name(level_number):
-    """Zero-padded level folder name, e.g. 1 -> 'level_001'."""
-    return "level_%03d" % int(level_number)
-
-
-def _level_id(world_number, level_number):
-    """Canonical level id, e.g. (1, 1) -> 'world_01_level_001'."""
-    return "%s_%s" % (_world_folder_name(world_number),
-                      _level_folder_name(level_number))
-
-
-def _level_collection_name(world_number, level_number):
-    """Per-level Blender collection name, e.g. (1, 1) -> 'WORLD_01_LEVEL_001'."""
-    return _level_id(world_number, level_number).upper()
+# Naming conventions are shared with snaked_tools' level saver (snaked_common).
+_world_folder_name = sc.world_folder_name
+_level_folder_name = sc.level_folder_name
+_level_id = sc.level_id
+_level_collection_name = sc.level_collection_name
 
 
 def _write_json_if_missing(path, contents):
@@ -200,9 +187,7 @@ def _write_json_if_missing(path, contents):
     if os.path.exists(path):
         print("[Levels] Kept existing %s" % path)
         return False
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(contents, fh, indent=2)
-        fh.write("\n")
+    sc.save_json(path, contents)
     print("[Levels] Created %s" % path)
     return True
 
@@ -270,10 +255,7 @@ def _load_all_levels(root):
 
 def _save_all_levels(root, data):
     """Write the combined index back to disk as pretty JSON."""
-    path = _all_levels_path(root)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
+    sc.save_json(_all_levels_path(root), data)
 
 
 def _register_level_in_index(root, entry):
