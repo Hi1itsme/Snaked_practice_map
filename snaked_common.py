@@ -354,6 +354,97 @@ class GuideMeshBuilder:
 
 
 # ---------------------------------------------------------------------------
+# Baked floor labels and borders (for labelled scene areas)
+# ---------------------------------------------------------------------------
+
+# Tessellated label geometry, cached per (text, size): rebuilds in the same
+# session reuse it instead of re-evaluating font curves.
+_label_mesh_cache = {}
+
+
+def text_mesh_data(text, size):
+    """Flat (verts, faces) tessellation of a text string.
+
+    Built through a throwaway FONT object; nothing is left behind in the
+    scene. Cached so repeated labels (and re-runs) do the work once.
+    """
+    import bpy
+    key = (text, size)
+    cached = _label_mesh_cache.get(key)
+    if cached is not None:
+        return cached
+
+    curve = bpy.data.curves.new(type='FONT', name="WS_TmpLabel")
+    curve.body = text
+    curve.size = size
+    curve.align_x = 'LEFT'
+    curve.align_y = 'BOTTOM'
+    curve.resolution_u = 3   # signage: readable at a fraction of the geometry
+    obj = bpy.data.objects.new("WS_TmpLabel", curve)
+
+    me = None
+    try:
+        me = obj.to_mesh()
+    except RuntimeError:
+        me = None
+    if me is None or len(me.vertices) == 0:
+        # Fallback: evaluate through the depsgraph (needs a scene link).
+        if me is not None:
+            obj.to_mesh_clear()
+        bpy.context.scene.collection.objects.link(obj)
+        deps = bpy.context.evaluated_depsgraph_get()
+        me = bpy.data.meshes.new_from_object(obj.evaluated_get(deps))
+        verts = [tuple(v.co) for v in me.vertices]
+        faces = [tuple(p.vertices) for p in me.polygons]
+        bpy.data.meshes.remove(me)
+    else:
+        verts = [tuple(v.co) for v in me.vertices]
+        faces = [tuple(p.vertices) for p in me.polygons]
+        obj.to_mesh_clear()
+
+    bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.data.curves.remove(curve)
+    _label_mesh_cache[key] = (verts, faces)
+    return verts, faces
+
+
+def add_label(builder, text, x, y, color, size=1.4):
+    """Bake a flat floor label into a guide builder (readable from top view).
+
+    Labels used to be one FONT object each -- hundreds of live curve objects
+    all weighing on the depsgraph. Tessellating them into the merged guide
+    mesh keeps signage at ZERO extra objects. The material is keyed by colour
+    so different accents never overwrite each other.
+    """
+    verts, faces = text_mesh_data(text, size)
+    mat_name = "Workshop_Label_%02X%02X%02X" % tuple(
+        int(c * 255 + 0.5) for c in color[:3])
+    # Just above the floor; no z-fight.
+    builder.add_mesh(verts, faces, (float(x), float(y), 0.05), mat_name, color)
+
+
+def add_border(builder, x0, y0, x1, y1, mat_name, color):
+    """Add a coloured frame around tile cells x0..x1, y0..y1 (inclusive)."""
+    t = 0.08          # border thickness
+    z = 0.04          # sits just above any floor lines
+    x_lo, x_hi = x0 - 0.5, x1 + 0.5
+    y_lo, y_hi = y0 - 0.5, y1 + 0.5
+    x_span = (x_hi - x_lo) + t
+    y_span = (y_hi - y_lo) + t
+    x_center = (x_lo + x_hi) / 2.0
+    y_center = (y_lo + y_hi) / 2.0
+
+    edges = (
+        ((x_center, y_lo, z), (x_span, t, t)),   # bottom
+        ((x_center, y_hi, z), (x_span, t, t)),   # top
+        ((x_lo, y_center, z), (t, y_span, t)),   # left
+        ((x_hi, y_center, z), (t, y_span, t)),   # right
+    )
+    for loc, size in edges:
+        builder.add_box(loc, size, mat_name, color)
+
+
+# ---------------------------------------------------------------------------
 # Master / placeholder asset geometry
 # ---------------------------------------------------------------------------
 # Placement convention: every master is modelled centred on its origin so a

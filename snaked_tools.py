@@ -535,8 +535,214 @@ def load_level(world, level, root=None):
 
 
 # ---------------------------------------------------------------------------
+# Completed Maps shelf (display area left of the main grid)
+# ---------------------------------------------------------------------------
+# Finished levels get shelved in a labelled area at negative X (the space
+# left of the grid is unused), one 22x40 slot per map stacked upward. Each
+# shelved map is shown as ONE collection instance of a hidden per-level
+# prototype -- same trick as the workshop's instanced fills -- so the shelf
+# stays cheap no matter how many maps are done. "Complete" is recorded as
+# status="complete" in the level's level.json and the all_levels.json index,
+# so the shelf can always be rebuilt from disk.
+
+COMPLETED_COLLECTION = "Snaked_Completed_Maps"
+COMPLETED_PROTO_PREFIX = "Level_Proto_"
+COMPLETED_ORIGIN_X = -30       # grid starts at x=1; slots span -30..-9
+COMPLETED_ORIGIN_Y = 1
+COMPLETED_GAP = 8              # empty rows between stacked maps
+COMPLETED_ACCENT = (0.35, 0.80, 0.55)   # green = done
+
+
+def _completed_slot_bounds(slot):
+    """Inclusive tile bounds (x0, y0, x1, y1) of shelf slot `slot`."""
+    x0 = COMPLETED_ORIGIN_X
+    y0 = COMPLETED_ORIGIN_Y + slot * (GRID_HEIGHT + COMPLETED_GAP)
+    return x0, y0, x0 + GRID_WIDTH - 1, y0 + GRID_HEIGHT - 1
+
+
+def set_level_status(world, level, status, root=None):
+    """Set a level's status ("draft" / "complete") in level.json + the index.
+
+    Returns the level's metadata dict. Raises OSError/ValueError when the
+    level has never been saved.
+    """
+    root = root or resolve_project_root()
+    path = _level_json_path(root, world, level)
+    with open(path, "r", encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["status"] = status
+    sc.save_json(path, meta)
+    _update_levels_index(root, meta)
+    return meta
+
+
+def _build_level_proto(meta):
+    """(Re)build the hidden prototype collection displaying one saved level.
+
+    Components are stamped as linked duplicates of the main-grid masters at
+    their absolute grid coords; the shelf's instance empty offsets the whole
+    prototype into its slot. The collection is NOT linked into the scene --
+    only its instance is visible.
+    """
+    import math
+    name = COMPLETED_PROTO_PREFIX + meta.get("id", "level")
+    coll = bpy.data.collections.get(name)
+    if coll is None:
+        coll = bpy.data.collections.new(name)
+    else:
+        for obj in list(coll.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    comps = meta.get("components", [])
+    solids = {(int(c.get("x", 0)), int(c.get("y", 0)), int(c.get("layer", 0)))
+              for c in comps if (c.get("type") or "").upper() in _SOLID_KINDS}
+    for c in comps:
+        kind = (c.get("type") or "").upper()
+        if kind not in MASTER_NAMES:
+            continue
+        master = _ensure_master(kind)
+        x, y, layer = (int(c.get("x", 0)), int(c.get("y", 0)),
+                       int(c.get("layer", 0)))
+        obj = bpy.data.objects.new("LvlProto_" + kind.title(), master.data)
+        on_solid = kind == "BUTTON" and (x, y, layer) in solids
+        obj.location = (float(x), float(y),
+                        _placement_z(kind, layer, on_solid=on_solid))
+        obj.rotation_euler = (0.0, 0.0,
+                              math.radians(int(c.get("rotation", 0))))
+        coll.objects.link(obj)
+    return coll
+
+
+def build_completed_area(root=None):
+    """Clear and rebuild the Completed Maps shelf from the level index.
+
+    Every level whose status is "complete" gets a bordered, labelled slot
+    and one collection-instance showing its contents. Safe to re-run any
+    time (it is how the shelf updates). Returns the number of maps shown.
+    """
+    root = root or resolve_project_root()
+    coll = _get_or_create_collection(COMPLETED_COLLECTION)
+    for obj in list(coll.objects):
+        sc.remove_object_with_orphan_data(obj)
+    # Drop stale prototypes; the loop below rebuilds the ones still needed.
+    for pcoll in [c for c in bpy.data.collections
+                  if c.name.startswith(COMPLETED_PROTO_PREFIX)]:
+        for obj in list(pcoll.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.collections.remove(pcoll)
+
+    index_path = os.path.join(root, "ai_data", "all_levels.json")
+    try:
+        with open(index_path, "r", encoding="utf-8") as fh:
+            entries = json.load(fh).get("levels", [])
+    except (OSError, ValueError):
+        entries = []
+    done = [e for e in entries if e.get("status") == "complete"]
+    done.sort(key=lambda e: (e.get("world", 0), e.get("level_number", 0)))
+    if not done:
+        return 0
+
+    guide = sc.GuideMeshBuilder("Snaked_CompletedGuide")
+    sc.add_label(guide, "COMPLETED MAPS",
+                 COMPLETED_ORIGIN_X - 0.5, COMPLETED_ORIGIN_Y - 5.0,
+                 COMPLETED_ACCENT, size=2.2)
+    shown = 0
+    for entry in done:
+        try:
+            path = _level_json_path(root, entry.get("world", 0),
+                                    entry.get("level_number", 0))
+            with open(path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError):
+            continue   # listed complete but unreadable: skip, keep shelving
+        x0, y0, x1, y1 = _completed_slot_bounds(shown)
+        sc.add_border(guide, x0, y0, x1, y1, "Snaked_CompletedBorder",
+                      COMPLETED_ACCENT)
+        title = ("%s  %s" % (meta.get("id", ""),
+                             meta.get("name", ""))).strip()
+        sc.add_label(guide, title, x0 - 0.5, y1 + 1.0, COMPLETED_ACCENT,
+                     size=1.2)
+
+        proto = _build_level_proto(meta)
+        empty = bpy.data.objects.new(
+            "Completed_" + meta.get("id", "level"), None)
+        empty.empty_display_size = 0.4
+        empty.instance_type = 'COLLECTION'
+        empty.instance_collection = proto
+        # Components sit at absolute 1-based grid coords inside the proto.
+        empty.location = (float(x0 - 1), float(y0 - 1), 0.0)
+        coll.objects.link(empty)
+        shown += 1
+
+    gobj = guide.build()
+    gobj.hide_select = True
+    _link_to_collection(gobj, coll)
+    return shown
+
+
+# ---------------------------------------------------------------------------
 # UI: properties, operator, panel
 # ---------------------------------------------------------------------------
+
+def load_level_catalog(root=None):
+    """{level_id: index entry} read from ai_data/all_levels.json.
+
+    The maps' lookup table: one read builds a dict keyed by level id, so
+    every later question ("what's W1-L3 called? is it complete?") is a fetch,
+    not a file search. Returns {} when nothing is saved yet.
+    """
+    root = root or resolve_project_root()
+    path = os.path.join(root, "ai_data", "all_levels.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {e["id"]: e for e in data.get("levels", []) if e.get("id")}
+
+
+# Level-catalog cache for the panel's Browse dropdown. Module-level for the
+# same reason as the piece catalog below: Blender enum callbacks must return
+# strings that stay referenced, and the JSON is only re-read on Refresh (or
+# automatically after save / load / status changes).
+_level_catalog = {}
+_level_enum_items = []
+
+
+def _refresh_level_catalog(root=None):
+    """Re-read the saved-level index; returns the number of levels found."""
+    global _level_catalog, _level_enum_items
+    _level_catalog = load_level_catalog(root)
+    entries = sorted(_level_catalog.values(),
+                     key=lambda e: (e.get("world", 0),
+                                    e.get("level_number", 0)))
+    items = []
+    for e in entries:
+        label = "W%d-L%d  %s" % (e.get("world", 0), e.get("level_number", 0),
+                                 e.get("name") or "(unnamed)")
+        if e.get("status") == "complete":
+            label += "  [complete]"
+        items.append((e["id"], label, e.get("path", "")))
+    _level_enum_items = items or [
+        ("NONE", "<no levels saved>", "Save a level first, then Refresh")]
+    return len(_level_catalog)
+
+
+def _level_items(self, context):
+    if not _level_enum_items:
+        _refresh_level_catalog()
+    return _level_enum_items
+
+
+def _on_pick_level(self, context):
+    """Enum update callback: point World/Level/Name at the browsed pick."""
+    entry = _level_catalog.get(self.saved_level)
+    if entry is None:
+        return
+    self.world = int(entry.get("world", self.world))
+    self.level = int(entry.get("level_number", self.level))
+    self.level_name = entry.get("name", "")
+
 
 # Piece-catalog cache for the panel's dropdown. Kept module-level on purpose:
 # Blender enum callbacks must return strings that stay referenced, and the
@@ -610,6 +816,13 @@ class SnakedToolsProps(bpy.types.PropertyGroup):
         name="Piece",
         description="Saved puzzle piece to stamp onto the grid at X/Y/Layer",
         items=_piece_items,
+    )
+    saved_level: bpy.props.EnumProperty(
+        name="Browse",
+        description="Saved levels from the index -- picking one points the "
+                    "World / Level / Name fields below at it",
+        items=_level_items,
+        update=_on_pick_level,
     )
     world: bpy.props.IntProperty(
         name="World", description="World number (1-8)",
@@ -697,6 +910,17 @@ class SNAKED_OT_place_piece(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SNAKED_OT_refresh_levels(bpy.types.Operator):
+    """Re-read the saved-level index (ai_data/all_levels.json)."""
+    bl_idname = "snaked.refresh_levels"
+    bl_label = "Refresh Levels"
+
+    def execute(self, context):
+        n = _refresh_level_catalog()
+        self.report({'INFO'}, "Level catalog: %d level(s)." % n)
+        return {'FINISHED'}
+
+
 class SNAKED_OT_save_level(bpy.types.Operator):
     """Save the grid's placed components to this world/level's level.json."""
     bl_idname = "snaked.save_level"
@@ -706,6 +930,7 @@ class SNAKED_OT_save_level(bpy.types.Operator):
         p = context.scene.snaked_tools
         path, n = save_level(p.world, p.level,
                              name=p.level_name.strip() or None)
+        _refresh_level_catalog()   # the new/renamed level shows in Browse
         self.report({'INFO'}, "Saved %d component(s) to %s" % (n, path))
         return {'FINISHED'}
 
@@ -722,6 +947,11 @@ class SNAKED_OT_load_level(bpy.types.Operator):
         if err:
             self.report({'ERROR'}, "Not loaded: %s" % err)
             return {'CANCELLED'}
+        # Show the loaded level's name in the panel.
+        _refresh_level_catalog()
+        entry = _level_catalog.get(_level_id(p.world, p.level))
+        if entry is not None:
+            p.level_name = entry.get("name", "")
         self.report({'INFO'}, "Loaded %s: %d component(s)."
                     % (_level_id(p.world, p.level), placed))
         return {'FINISHED'}
@@ -736,6 +966,53 @@ class SNAKED_OT_clear_grid(bpy.types.Operator):
     def execute(self, context):
         n = clear_components()
         self.report({'INFO'}, "Removed %d component(s)." % n)
+        return {'FINISHED'}
+
+
+def _set_status_and_reshelve(op, context, status, verb):
+    """Shared body for the mark-complete / mark-draft operators."""
+    p = context.scene.snaked_tools
+    try:
+        meta = set_level_status(p.world, p.level, status)
+    except (OSError, ValueError):
+        op.report({'ERROR'}, "No saved level.json for world %d level %d -- "
+                  "save the level first." % (p.world, p.level))
+        return {'CANCELLED'}
+    shown = build_completed_area()
+    _refresh_level_catalog()   # status tag in the Browse dropdown updates
+    op.report({'INFO'}, "%s %s. Shelf now shows %d completed map(s)."
+              % (verb, meta.get("id", ""), shown))
+    return {'FINISHED'}
+
+
+class SNAKED_OT_mark_complete(bpy.types.Operator):
+    """Mark this world/level complete and shelve it in the Completed Maps
+    area (left of the grid)."""
+    bl_idname = "snaked.mark_complete"
+    bl_label = "Mark Complete & Shelve"
+
+    def execute(self, context):
+        return _set_status_and_reshelve(self, context, "complete", "Completed")
+
+
+class SNAKED_OT_mark_draft(bpy.types.Operator):
+    """Mark this world/level back to draft and remove it from the shelf."""
+    bl_idname = "snaked.mark_draft"
+    bl_label = "Mark as Draft"
+
+    def execute(self, context):
+        return _set_status_and_reshelve(self, context, "draft",
+                                        "Back to draft:")
+
+
+class SNAKED_OT_rebuild_completed(bpy.types.Operator):
+    """Rebuild the Completed Maps shelf from the saved level index."""
+    bl_idname = "snaked.rebuild_completed"
+    bl_label = "Rebuild Shelf"
+
+    def execute(self, context):
+        shown = build_completed_area()
+        self.report({'INFO'}, "Completed Maps shelf: %d map(s)." % shown)
         return {'FINISHED'}
 
 
@@ -785,6 +1062,10 @@ class SNAKED_PT_tools(bpy.types.Panel):
         # --- Levels: save / load the grid as world_NN/level_MMM ----------
         box2 = layout.box()
         box2.label(text="Levels", icon='FILE')
+        row = box2.row(align=True)
+        row.prop(p, "saved_level", text="")
+        row.operator(SNAKED_OT_refresh_levels.bl_idname, text="",
+                     icon='FILE_REFRESH')
         col = box2.column(align=True)
         col.prop(p, "world")
         col.prop(p, "level")
@@ -793,6 +1074,18 @@ class SNAKED_PT_tools(bpy.types.Panel):
         row.operator(SNAKED_OT_save_level.bl_idname, icon='EXPORT')
         row.operator(SNAKED_OT_load_level.bl_idname, icon='IMPORT')
         box2.operator(SNAKED_OT_clear_grid.bl_idname, icon='TRASH')
+
+        # --- Completed Maps: shelve finished levels left of the grid -----
+        box3 = layout.box()
+        box3.label(text="Completed Maps", icon='CHECKMARK')
+        box3.label(text="Shelved left of the grid (X=%d), one slot per map."
+                        % COMPLETED_ORIGIN_X, icon='INFO')
+        row = box3.row(align=True)
+        row.operator(SNAKED_OT_mark_complete.bl_idname, icon='CHECKMARK')
+        row.operator(SNAKED_OT_mark_draft.bl_idname, text="",
+                     icon='LOOP_BACK')
+        box3.operator(SNAKED_OT_rebuild_completed.bl_idname,
+                      icon='FILE_REFRESH')
 
 
 # ---------------------------------------------------------------------------
@@ -804,9 +1097,13 @@ _classes = (
     SNAKED_OT_apply,
     SNAKED_OT_refresh_pieces,
     SNAKED_OT_place_piece,
+    SNAKED_OT_refresh_levels,
     SNAKED_OT_save_level,
     SNAKED_OT_load_level,
     SNAKED_OT_clear_grid,
+    SNAKED_OT_mark_complete,
+    SNAKED_OT_mark_draft,
+    SNAKED_OT_rebuild_completed,
     SNAKED_PT_tools,
 )
 
