@@ -1,0 +1,259 @@
+"""Snaked map row. Run this text (Alt+P) to restore the panel after reopening.
+40 cells along X, 22 along Y; one-unit tiles. Border occupies outermost cells.
+All edits are confined to tagged maps beneath Snaked_Map_Row.
+"""
+import bpy
+from bpy.props import IntProperty, BoolProperty
+from mathutils import Vector, Quaternion
+
+WIDTH, HEIGHT = 40, 22
+ROW = 'Snaked_Map_Row'
+TAG = 'snaked_row_map'
+
+def maps():
+    row = bpy.data.collections.get(ROW)
+    return sorted([c for c in row.children if c.get(TAG)] if row else [], key=lambda c: c['row_id'], reverse=True)
+
+def root_of(c):
+    return next(o for o in c.objects if o.get('row_anchor'))
+
+def collection(name, parent):
+    c = bpy.data.collections.new(name)
+    parent.children.link(c)
+    return c
+
+def link_object(name, data, c, root=None):
+    o = bpy.data.objects.new(name, data)
+    c.objects.link(o)
+    if root: o.parent = root
+    return o
+
+def active_map(context):
+    o = context.active_object
+    if o:
+        for c in maps():
+            if o.name in c.all_objects: return c
+    c = context.view_layer.active_layer_collection.collection
+    for m in maps():
+        if c == m or c in list(m.children): return m
+    return maps()[0] if maps() else None
+
+def reflow(context):
+    gap = context.scene.snaked_row_gap
+    for slot, c in enumerate(maps()):
+        root = root_of(c)
+        dest = Vector((-WIDTH-gap-slot*(WIDTH+gap), 0, 0))
+        delta = dest-root.location
+        members = set(c.all_objects)
+        # Includes manually added content, while avoiding moving children twice.
+        for o in members:
+            if o.parent not in members:
+                o.location += delta
+        c['origin_x'] = dest.x
+        c['origin_y'] = 0.0
+
+def wall_mesh():
+    for name in ('WS_Master_Wall', 'Master_Wall'):
+        master = bpy.data.objects.get(name)
+        if master and master.type == 'MESH': return master.data
+    mesh = bpy.data.meshes.get('MapRow_WallMesh')
+    if mesh: return mesh
+    mesh = bpy.data.meshes.new('MapRow_WallMesh')
+    mesh.from_pydata([(x,y,z) for z in (-.5,.5) for y in (-.5,.5) for x in (-.5,.5)], [], [(0,2,3,1),(4,5,7,6),(0,1,5,4),(2,6,7,3),(0,4,6,2),(1,3,7,5)])
+    mesh.update()
+    return mesh
+
+def border(c):
+    root = root_of(c)
+    walls = next(child for child in c.children if child.get('row_role') == 'walls')
+    occupied = {(o.get('snaked_x'),o.get('snaked_y')) for o in walls.objects if o.get('row_border')}
+    count = 0
+    mesh = wall_mesh()
+    for y in range(1,HEIGHT+1):
+        for x in range(1,WIDTH+1):
+            if x not in (1,WIDTH) and y not in (1,HEIGHT): continue
+            if (x,y) in occupied: continue
+            o = link_object('Map%03d_Wall_%02d_%02d' % (c['row_id'],x,y),mesh,walls,root)
+            o.location = (x-.5,y-.5,.5)
+            o['row_border'] = True
+            o['snaked_component'] = 'WALL'
+            o['snaked_x'],o['snaked_y'],o['snaked_z'] = x,y,0
+            count += 1
+    return count
+
+def activate(context,c):
+    def find(layer,target):
+        if layer.collection==target:return layer
+        for child in layer.children:
+            found=find(child,target)
+            if found:return found
+    content=next(ch for ch in c.children if ch.get('row_role')=='content')
+    context.view_layer.active_layer_collection=find(context.view_layer.layer_collection,content)
+    for o in context.selected_objects:o.select_set(False)
+    root=root_of(c)
+    root.select_set(True)
+    context.view_layer.objects.active=root
+    context.scene.cursor.location=root.location+Vector((1.5,1.5,0))
+
+def add_map(context, with_border=True):
+    row=bpy.data.collections.get(ROW)
+    if row is None:row=collection(ROW,context.scene.collection)
+    next_id=max([c['row_id'] for c in maps()]+[0])+1
+    c=collection('ROW_MAP_%03d'%next_id,row)
+    c[TAG]=True
+    c['row_id']=next_id
+    c['grid_size']=[WIDTH,HEIGHT,1]
+    c['border_width']=1
+    c['coordinate_note']='Local tile centers: x-0.5, y-0.5; origin_x is display offset only'
+    root=link_object('Map_%03d_Origin'%next_id,None,c)
+    root['row_anchor']=True
+    root.empty_display_type='PLAIN_AXES'
+    root.empty_display_size=.7
+    for role in ('guides','walls','content'):
+        child=collection('Map_%03d_%s'%(next_id,role.title()),c)
+        child['row_role']=role
+    guides=next(ch for ch in c.children if ch.get('row_role')=='guides')
+    verts=[]; edges=[]
+    for x in range(WIDTH+1):
+        i=len(verts);verts.extend([(x,0,0),(x,HEIGHT,0)]);edges.append((i,i+1))
+    for y in range(HEIGHT+1):
+        i=len(verts);verts.extend([(0,y,0),(WIDTH,y,0)]);edges.append((i,i+1))
+    mesh=bpy.data.meshes.new('Map_%03d_Grid'%next_id)
+    mesh.from_pydata(verts,edges,[]);mesh.update()
+    grid=link_object(mesh.name,mesh,guides,root)
+    grid.hide_select=True;grid.hide_render=True
+    grid.color=(.25,.45,.55,1)
+    text=bpy.data.curves.new('Map_%03d_Label'%next_id,'FONT')
+    text.body='MAP %03d   |   40 x 22'%next_id
+    text.size=1.1
+    label=link_object(text.name,text,guides,root)
+    label.location=(0,HEIGHT+1,0)
+    label.hide_select=True;label.hide_render=True
+    if with_border:border(c)
+    reflow(context)
+    context.view_layer.update()
+    activate(context,c)
+    return c
+
+class SNAKEDROW_OT_add(bpy.types.Operator):
+    bl_idname='snaked_row.add'
+    bl_label='Add 40 x 22 Map'
+    bl_description='Insert nearest the Y axis; shift older maps left, including their content'
+    bl_options={'REGISTER','UNDO'}
+    def execute(self,context):
+        c=add_map(context,context.scene.snaked_row_border)
+        self.report({'INFO'},'Created '+c.name)
+        return {'FINISHED'}
+
+class SNAKEDROW_OT_border(bpy.types.Operator):
+    bl_idname='snaked_row.border'
+    bl_label='Generate / Fill Wall Border'
+    bl_description='Fill missing outer-edge cells with one-unit walls; existing walls are preserved'
+    bl_options={'REGISTER','UNDO'}
+    def execute(self,context):
+        c=active_map(context)
+        if not c:
+            self.report({'WARNING'},'Add a map first');return {'CANCELLED'}
+        n=border(c)
+        self.report({'INFO'},'%s: added %d walls'%(c.name,n))
+        return {'FINISHED'}
+
+class SNAKEDROW_OT_reflow(bpy.types.Operator):
+    bl_idname='snaked_row.reflow'
+    bl_label='Apply Map Spacing'
+    bl_options={'REGISTER','UNDO'}
+    def execute(self,context):
+        reflow(context);return {'FINISHED'}
+
+class SNAKEDROW_OT_focus(bpy.types.Operator):
+    bl_idname='snaked_row.focus'
+    bl_label='View Map Row'
+    def execute(self,context):
+        items=maps()
+        if not items:return {'CANCELLED'}
+        gap=context.scene.snaked_row_gap
+        span=len(items)*(WIDTH+gap)-gap
+        for area in context.screen.areas:
+            if area.type=='VIEW_3D':
+                s=area.spaces.active
+                s.region_3d.view_rotation=Quaternion((1,0,0,0))
+                s.region_3d.view_perspective='ORTHO'
+                s.region_3d.view_location=(-gap-span/2,HEIGHT/2,0)
+                s.region_3d.view_distance=max(20,span*.45)
+                s.overlay.show_relationship_lines=False
+        return {'FINISHED'}
+
+class SNAKEDROW_PT_panel(bpy.types.Panel):
+    bl_label='Map Row - Left of Y Axis'
+    bl_idname='SNAKEDROW_PT_panel'
+    bl_space_type='VIEW_3D'
+    bl_region_type='UI'
+    bl_category='Snaked Maps'
+    def draw(self,context):
+        l=self.layout;s=context.scene
+        l.label(text='40 X x 22 Y | 1 unit per cell')
+        l.prop(s,'snaked_row_gap')
+        l.prop(s,'snaked_row_border')
+        l.operator('snaked_row.add',icon='ADD')
+        l.operator('snaked_row.border',icon='MESH_CUBE')
+        l.operator('snaked_row.reflow')
+        l.operator('snaked_row.focus',icon='VIEWZOOM')
+        l.separator()
+        l.label(text='Newest map sits nearest Y axis.')
+        l.label(text='Border: 1 cell; interior: 38 x 20.')
+        l.label(text='Add objects to each Content collection.')
+        l.label(text='%d maps in row'%len(maps()))
+        c=active_map(context)
+        if c:l.label(text='Target: '+c.name)
+
+def _load_piece_extension():
+    """Load the embedded piece browser, falling back to the sibling source file."""
+    import os
+    text = bpy.data.texts.get('snaked_map_pieces.py')
+    if text is not None:
+        source = text.as_string()
+    else:
+        candidates = []
+        main_text = bpy.data.texts.get('snaked_map_row.py')
+        if main_text is not None and main_text.filepath:
+            candidates.append(os.path.join(
+                os.path.dirname(bpy.path.abspath(main_text.filepath)),
+                'snaked_map_pieces.py'))
+        if '__file__' in globals():
+            candidates.append(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'snaked_map_pieces.py'))
+        candidates.append(
+            'C:/Users/slevi/Documents/Codex/2026-09-24/'
+            'computer-plugin-computer-use-openai-bundled/outputs/'
+            'snaked_map_pieces.py')
+        path = next((candidate for candidate in candidates
+                     if os.path.isfile(candidate)), None)
+        if path is None:
+            raise FileNotFoundError(
+                "Missing embedded text 'snaked_map_pieces.py'. "
+                "Open snaked_map_pieces.py in Blender once, then run this script again.")
+        with open(path, 'r', encoding='utf-8-sig') as handle:
+            source = handle.read()
+    exec(compile(source, 'snaked_map_pieces.py', 'exec'), globals())
+
+
+_load_piece_extension()
+
+CLASSES=(SNAKEDROW_OT_add,SNAKEDROW_OT_border,SNAKEDROW_OT_reflow,SNAKEDROW_OT_focus,SNAKEDROW_PT_panel)+PIECE_CLASSES
+def register():
+    for old in reversed(bpy.app.driver_namespace.get('snaked_row_classes', ())):
+        try:bpy.utils.unregister_class(old)
+        except RuntimeError:pass
+    for cls in CLASSES:bpy.utils.register_class(cls)
+    bpy.app.driver_namespace['snaked_row_classes']=CLASSES
+    register_piece_props()
+    if not hasattr(bpy.types.Scene,'snaked_row_gap'):
+        bpy.types.Scene.snaked_row_gap=IntProperty(name='Gap (cells)',default=4,min=1,max=100)
+    if not hasattr(bpy.types.Scene,'snaked_row_border'):
+        bpy.types.Scene.snaked_row_border=BoolProperty(name='Wall border on new maps',default=True)
+
+if __name__=='__main__':
+    register()
+
+

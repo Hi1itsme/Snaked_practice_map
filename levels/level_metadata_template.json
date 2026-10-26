@@ -1,0 +1,29 @@
+{
+  "id": "",
+  "name": "",
+  "world": 0,
+  "level_number": 0,
+  "difficulty": 0,
+  "grid_size": [
+    0,
+    0,
+    0
+  ],
+  "pieces_used": [],
+  "start_position": [
+    0,
+    0,
+    0
+  ],
+  "start_direction": "",
+  "goal_position": [
+    0,
+    0,
+    0
+  ],
+  "required_mechanics": [],
+  "introduced_mechanics": [],
+  "tags": [],
+  "notes": "",
+  "status": "draft"
+}

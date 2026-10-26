@@ -1,0 +1,342 @@
+"""Build nine regular-size rail-only puzzle boxes below the workshop."""
+import bpy
+import math
+from bpy.props import BoolProperty, EnumProperty, IntProperty
+from mathutils import Vector, Quaternion
+
+BOX_SIZE = 8
+GRID_COLS = GRID_ROWS = 3
+BOX_COUNT = 9
+WORKSHOP_START_X = 60
+WORKSHOP_BOTTOM_Y = 1
+ROW = 'Snaked_Rail_Puzzle_Row'
+TAG = 'snaked_rail_puzzle'
+CLASS_KEY = 'snaked_rail_puzzle_classes'
+_puzzle_enum_cache = []
+
+
+def puzzles():
+    row = bpy.data.collections.get(ROW)
+    return sorted((c for c in row.children if c.get(TAG)) if row else [],
+                  key=lambda c: int(c.get('rail_puzzle_id', 0)))
+
+
+def puzzle_items(self, context):
+    global _puzzle_enum_cache
+    _puzzle_enum_cache = [
+        (c.name, 'Rail Puzzle %03d' % int(c['rail_puzzle_id']),
+         'Edit this regular 8x8 rail puzzle box', int(c['rail_puzzle_id']))
+        for c in puzzles()
+    ] or [('NONE', 'No rail puzzle boxes', 'Build the rail boxes first', 0)]
+    return _puzzle_enum_cache
+
+
+def root_of(collection):
+    return next((o for o in collection.objects if o.get('row_anchor')), None)
+
+
+def child_with_role(collection, role):
+    return next((c for c in collection.children
+                 if c.get('row_role') == role), None)
+
+
+def new_collection(name, parent):
+    collection = bpy.data.collections.new(name)
+    parent.children.link(collection)
+    return collection
+
+
+def link_object(name, data, collection, root=None):
+    obj = bpy.data.objects.new(name, data)
+    collection.objects.link(obj)
+    if root is not None:
+        obj.parent = root
+    return obj
+
+
+def rebuild_guides(collection):
+    puzzle_id = int(collection['rail_puzzle_id'])
+    root = root_of(collection)
+    guides = child_with_role(collection, 'guides')
+    if guides is None:
+        guides = new_collection('Rail_Puzzle_%03d_Guides' % puzzle_id,
+                                collection)
+        guides['row_role'] = 'guides'
+    for obj in list(guides.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    vertices, edges = [], []
+    for x in range(BOX_SIZE + 1):
+        index = len(vertices)
+        vertices.extend([(x, 0, 0), (x, BOX_SIZE, 0)])
+        edges.append((index, index + 1))
+    for y in range(BOX_SIZE + 1):
+        index = len(vertices)
+        vertices.extend([(0, y, 0), (BOX_SIZE, y, 0)])
+        edges.append((index, index + 1))
+    mesh = bpy.data.meshes.new('Rail_Puzzle_%03d_Grid' % puzzle_id)
+    mesh.from_pydata(vertices, edges, [])
+    mesh.update()
+    grid = link_object(mesh.name, mesh, guides, root)
+    grid.hide_select = True
+    grid.hide_render = True
+    grid.color = (.95, .45, .12, 1)
+    text = bpy.data.curves.new('Rail_Puzzle_%03d_Label' % puzzle_id, 'FONT')
+    text.body = 'RAIL PUZZLE %03d   |   8 x 8' % puzzle_id
+    text.size = .75
+    label = link_object(text.name, text, guides, root)
+    label.location = (0, BOX_SIZE + .6, 0)
+    label.hide_select = True
+    label.hide_render = True
+
+
+def ensure_puzzle(context, puzzle_id):
+    row = bpy.data.collections.get(ROW)
+    if row is None:
+        row = new_collection(ROW, context.scene.collection)
+    collection = next((c for c in row.children
+                       if int(c.get('rail_puzzle_id', 0)) == puzzle_id), None)
+    if collection is None:
+        collection = new_collection('RAIL_PUZZLE_%03d' % puzzle_id, row)
+    collection[TAG] = True
+    collection['rail_only'] = True
+    collection['rail_puzzle_id'] = puzzle_id
+    collection['grid_size'] = [BOX_SIZE, BOX_SIZE, 1]
+    collection['coordinate_note'] = 'Rail-only 8x8 box; centers x-0.5, y-0.5'
+    root = root_of(collection)
+    if root is None:
+        root = link_object('Rail_Puzzle_%03d_Origin' % puzzle_id,
+                           None, collection)
+    root['row_anchor'] = True
+    root['rail_puzzle_anchor'] = True
+    root.empty_display_type = 'PLAIN_AXES'
+    root.empty_display_size = .55
+    content = child_with_role(collection, 'content')
+    if content is None:
+        content = new_collection('Rail_Puzzle_%03d_Content' % puzzle_id,
+                                 collection)
+        content['row_role'] = 'content'
+    rebuild_guides(collection)
+    return collection
+
+
+def reflow(context):
+    gap = int(getattr(context.scene, 'snaked_rail_puzzle_box_gap', 4))
+    below_gap = int(getattr(context.scene, 'snaked_rail_puzzle_below_gap', 4))
+    start_x = int(getattr(context.scene, 'snaked_rail_puzzle_start_x', 60))
+    top_row_y = WORKSHOP_BOTTOM_Y - below_gap - BOX_SIZE
+    for collection in puzzles():
+        index = int(collection['rail_puzzle_id']) - 1
+        column, row = index % GRID_COLS, index // GRID_COLS
+        destination = Vector((start_x + column * (BOX_SIZE + gap),
+                              top_row_y - row * (BOX_SIZE + gap), 0))
+        root = root_of(collection)
+        delta = destination - root.location
+        members = set(collection.all_objects)
+        for obj in members:
+            if obj.parent not in members:
+                obj.location += delta
+        collection['origin_x'] = destination.x
+        collection['origin_y'] = destination.y
+
+
+def build_grid(context):
+    built = [ensure_puzzle(context, puzzle_id)
+             for puzzle_id in range(1, BOX_COUNT + 1)]
+    reflow(context)
+    context.view_layer.update()
+    return built
+
+
+def selected_puzzle(scene):
+    collection = bpy.data.collections.get(scene.snaked_rail_puzzle_target)
+    if collection is None or not collection.get(TAG):
+        raise ValueError('Choose a rail puzzle box first')
+    return collection
+
+
+def cursor_cell(context, collection):
+    root = root_of(collection)
+    context.view_layer.update()
+    local = root.matrix_world.inverted() @ context.scene.cursor.location
+    return math.floor(local.x) + 1, math.floor(local.y) + 1
+
+
+def remove_rail(collection, column, row, layer):
+    matches = [obj for obj in collection.all_objects
+               if obj.get('snaked_component') == 'RAIL'
+               and int(obj.get('snaked_x', -999)) == column
+               and int(obj.get('snaked_y', -999)) == row
+               and int(obj.get('snaked_z', -999)) == layer]
+    for obj in matches:
+        bpy.data.objects.remove(obj, do_unlink=True)
+    return len(matches)
+
+
+class SNAKEDRAILPUZZLE_OT_build(bpy.types.Operator):
+    bl_idname = 'snaked_rail_puzzle.build'
+    bl_label = 'Build / Repair 3 x 3 Rail Boxes'
+    bl_description = 'Create nine separate regular 8x8 rail-only puzzle boxes'
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context):
+        built = build_grid(context)
+        self.report({'INFO'}, 'Prepared %d rail puzzle boxes' % len(built))
+        return {'FINISHED'}
+
+
+class SNAKEDRAILPUZZLE_OT_reflow(bpy.types.Operator):
+    bl_idname = 'snaked_rail_puzzle.reflow'
+    bl_label = 'Apply Rail Box Spacing'
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context):
+        reflow(context)
+        return {'FINISHED'}
+
+
+class SNAKEDRAILPUZZLE_OT_place(bpy.types.Operator):
+    bl_idname = 'snaked_rail_puzzle.place'
+    bl_label = 'Place Rail'
+    bl_description = 'Place the selected rail in this puzzle box'
+    bl_options = {'REGISTER', 'UNDO'}
+    at_cursor: BoolProperty(default=False, options={'SKIP_SAVE'})
+    def execute(self, context):
+        scene = context.scene
+        try:
+            collection = selected_puzzle(scene)
+            column, row = (cursor_cell(context, collection) if self.at_cursor
+                           else (scene.snaked_rail_puzzle_column,
+                                 scene.snaked_rail_puzzle_row))
+            placer = bpy.app.driver_namespace.get('snaked_place_rail')
+            if placer is None:
+                raise ValueError('Rail tools are not loaded; run the toolkit again')
+            obj = placer(context, collection, scene.snaked_rail_puzzle_kind,
+                         column, row, scene.snaked_rail_puzzle_layer,
+                         int(scene.snaked_rail_puzzle_rotation))
+        except ValueError as error:
+            self.report({'WARNING'}, str(error))
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Placed ' + obj.name)
+        return {'FINISHED'}
+
+
+class SNAKEDRAILPUZZLE_OT_erase(bpy.types.Operator):
+    bl_idname = 'snaked_rail_puzzle.erase'
+    bl_label = 'Remove Rail'
+    bl_description = 'Remove the rail anchored at this puzzle cell'
+    bl_options = {'REGISTER', 'UNDO'}
+    at_cursor: BoolProperty(default=False, options={'SKIP_SAVE'})
+    def execute(self, context):
+        scene = context.scene
+        try:
+            collection = selected_puzzle(scene)
+            column, row = (cursor_cell(context, collection) if self.at_cursor
+                           else (scene.snaked_rail_puzzle_column,
+                                 scene.snaked_rail_puzzle_row))
+        except ValueError as error:
+            self.report({'WARNING'}, str(error))
+            return {'CANCELLED'}
+        count = remove_rail(collection, column, row,
+                            scene.snaked_rail_puzzle_layer)
+        if not count:
+            self.report({'WARNING'}, 'No rail is anchored at that cell')
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Removed %d rail(s)' % count)
+        return {'FINISHED'}
+
+
+class SNAKEDRAILPUZZLE_OT_focus(bpy.types.Operator):
+    bl_idname = 'snaked_rail_puzzle.focus'
+    bl_label = 'View Rail Puzzle Boxes'
+    def execute(self, context):
+        if not puzzles():
+            return {'CANCELLED'}
+        gap = context.scene.snaked_rail_puzzle_box_gap
+        below = context.scene.snaked_rail_puzzle_below_gap
+        start_x = context.scene.snaked_rail_puzzle_start_x
+        width = GRID_COLS * BOX_SIZE + (GRID_COLS - 1) * gap
+        height = GRID_ROWS * BOX_SIZE + (GRID_ROWS - 1) * gap
+        top_y = WORKSHOP_BOTTOM_Y - below
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                space = area.spaces.active
+                space.region_3d.view_rotation = Quaternion((1, 0, 0, 0))
+                space.region_3d.view_perspective = 'ORTHO'
+                space.region_3d.view_location = (
+                    start_x + width / 2, top_y - height / 2, 0)
+                space.region_3d.view_distance = max(width, height) * .7
+                space.overlay.show_relationship_lines = False
+        return {'FINISHED'}
+
+
+class SNAKEDRAILPUZZLE_PT_panel(bpy.types.Panel):
+    bl_label = 'Rail Puzzle Boxes - Below Workshop'
+    bl_idname = 'SNAKEDRAILPUZZLE_PT_panel'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Snaked Maps'
+    def draw(self, context):
+        layout, scene = self.layout, context.scene
+        layout.label(text='Edit one of nine regular 8 x 8 boxes')
+        layout.prop(scene, 'snaked_rail_puzzle_target')
+        layout.prop(scene, 'snaked_rail_puzzle_kind')
+        cell = layout.row(align=True)
+        cell.prop(scene, 'snaked_rail_puzzle_column')
+        cell.prop(scene, 'snaked_rail_puzzle_row')
+        layout.prop(scene, 'snaked_rail_puzzle_layer')
+        layout.prop(scene, 'snaked_rail_puzzle_rotation')
+        layout.operator('snaked_rail_puzzle.place', icon='ADD').at_cursor = False
+        layout.operator('snaked_rail_puzzle.place', text='Place at 3D Cursor',
+                        icon='PIVOT_CURSOR').at_cursor = True
+        remove = layout.row(align=True)
+        remove.operator('snaked_rail_puzzle.erase',
+                        text='Remove Rail').at_cursor = False
+        remove.operator('snaked_rail_puzzle.erase',
+                        text='Remove at Cursor').at_cursor = True
+        layout.operator('snaked_rail_puzzle.focus', icon='VIEWZOOM')
+        layout.label(text='Cells use columns and rows 1-8.')
+
+
+CLASSES = (SNAKEDRAILPUZZLE_OT_build, SNAKEDRAILPUZZLE_OT_reflow,
+           SNAKEDRAILPUZZLE_OT_place, SNAKEDRAILPUZZLE_OT_erase,
+           SNAKEDRAILPUZZLE_OT_focus, SNAKEDRAILPUZZLE_PT_panel)
+
+
+def register():
+    for old in reversed(bpy.app.driver_namespace.get(CLASS_KEY, ())):
+        try:
+            bpy.utils.unregister_class(old)
+        except RuntimeError:
+            pass
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
+    bpy.app.driver_namespace[CLASS_KEY] = CLASSES
+    bpy.types.Scene.snaked_rail_puzzle_start_x = IntProperty(
+        name='Start X', default=60, min=-1000, max=1000)
+    bpy.types.Scene.snaked_rail_puzzle_box_gap = IntProperty(
+        name='Gap Between Boxes', default=4, min=2, max=100)
+    bpy.types.Scene.snaked_rail_puzzle_below_gap = IntProperty(
+        name='Gap Below Puzzles', default=4, min=2, max=100)
+    bpy.types.Scene.snaked_rail_puzzle_target = EnumProperty(
+        name='Box', items=puzzle_items)
+    bpy.types.Scene.snaked_rail_puzzle_kind = EnumProperty(
+        name='Rail', items=[
+            ('STRAIGHT', 'Straight Rail', 'Place a straight rail'),
+            ('CORNER', '90 Degree Rail', 'Place a 90 degree rail'),
+            ('CORNER_MIRROR', '90 Degree Rail Mirror',
+             'Place the mirrored 90 degree rail'),
+            ('END', 'Rail End', 'Place a rail end'),
+        ])
+    bpy.types.Scene.snaked_rail_puzzle_column = IntProperty(
+        name='Column', default=1, min=1, max=BOX_SIZE)
+    bpy.types.Scene.snaked_rail_puzzle_row = IntProperty(
+        name='Row', default=1, min=1, max=BOX_SIZE)
+    bpy.types.Scene.snaked_rail_puzzle_layer = IntProperty(
+        name='Layer', default=0, min=0, max=20)
+    bpy.types.Scene.snaked_rail_puzzle_rotation = EnumProperty(
+        name='Rotation', items=[
+            (str(value), str(value) + ' degrees', 'Rail direction')
+            for value in (0, 90, 180, 270)
+        ])
+
+
+if __name__ == '__main__':
+    register()

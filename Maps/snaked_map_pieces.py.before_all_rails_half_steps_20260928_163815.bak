@@ -1,0 +1,263 @@
+# Puzzle-piece browser and placement for map-row collections.
+import json, math, sys, importlib
+from pathlib import Path
+from bpy.props import EnumProperty, StringProperty
+CATALOG_TEXT='Snaked_Map_Row_Piece_Catalog.json'
+CATALOG_PATH='C:/Users/slevi/Desktop/Snaked/Snaked_Project/ai_data/all_puzzle_pieces.json'
+SOURCE_DIR='C:/Users/slevi/Desktop/Python/Blender'
+_catalog={}
+_categories=[]
+_piece_lists={}
+_map_items=[]
+_CATEGORY_LABELS={'ramp_puzzle':'Ramps','ramp_wall':'Ramps + Walls','ramp_wall_button':'Ramps + Walls + Buttons','workbench':'Workbench','special':'Special'}
+
+_BUILTIN_PIECES=[{
+    'id':'special_exit_door',
+    'name':'Exit Door',
+    'category':'special',
+    'grid_size':[1,1,1],
+    'components':[{
+        'type':'exit_door','x':0,'y':0,'layer':0,'rotation':0,'id':'exit'
+    }],
+}]
+
+def cache_catalog(pieces):
+    global _catalog,_categories,_piece_lists
+    combined=list(pieces)+[p for p in _BUILTIN_PIECES
+                           if not any(item.get('id')==p['id'] for item in pieces)]
+    _catalog={p['id']:p for p in combined if p.get('id') and p.get('components')}
+    cats=sorted({p.get('category') or 'other' for p in _catalog.values()})
+    _categories=[('ALL','All Categories','All available puzzle pieces',0)]+[(c,_CATEGORY_LABELS.get(c,c.replace('_',' ').title()),c,i+1) for i,c in enumerate(cats)]
+    _piece_lists={}
+
+def load_cached_catalog():
+    text=bpy.data.texts.get(CATALOG_TEXT)
+    if text:cache_catalog(json.loads(text.as_string()).get('pieces',[]))
+    else:cache_catalog([])
+
+def refresh_catalog():
+    pieces=[]
+    warnings=[]
+    try:pieces=json.loads(Path(CATALOG_PATH).read_text(encoding='utf-8-sig')).get('pieces',[])
+    except (OSError,ValueError) as e:warnings.append('Saved catalog unavailable')
+    try:
+        if SOURCE_DIR not in sys.path:sys.path.insert(0,SOURCE_DIR)
+        ws=importlib.import_module('puzzle_piece_workshop')
+        for area,count,key in [('WORKBENCH',len(ws.ZONES),'zone_i'),('RAMP',len(ws.RAMP_PUZZLES),'ramp_i'),('RAMPWALL',len(ws.RAMP_WALL_CELLS),'rw_i'),('RAMPWALLBUTTON',len(ws.RAMP_WALL_BUTTON_CELLS),'rwb_i')]:
+            for i in range(count):
+                args={'zone_i':0,'ramp_i':0,'rw_i':0,'rwb_i':0};args[key]=i
+                comps=ws._capture_cell_components(*ws._area_cell_bounds(area,**args))
+                if not comps:continue
+                comps=ws._transform_piece(comps,0,False)
+                label=ws._piece_cell_label(area,**args)
+                pieces.append({'id':'workshop_'+area.lower()+'_'+str(i),'name':label+' [Workshop]','category':ws._AREA_PIECE_INFO[area][1],'components':comps})
+    except Exception as e:warnings.append('Workshop refresh: '+str(e))
+    if not pieces:
+        raise ValueError('; '.join(warnings) or 'No puzzle pieces found; existing catalog kept')
+    cache_catalog(pieces)
+    text=bpy.data.texts.get(CATALOG_TEXT) or bpy.data.texts.new(CATALOG_TEXT)
+    text.from_string(json.dumps({'pieces':list(_catalog.values())},indent=2))
+    return len(_catalog),warnings
+
+def category_items(self,context):return _categories
+
+def piece_items(self,context):
+    cat=self.snaked_piece_category
+    query=self.snaked_piece_search.strip().casefold()
+    key=(cat,query)
+    if key not in _piece_lists:
+        ordered=sorted(_catalog.values(),key=lambda p:(p.get('name',p['id']).casefold(),p['id']))
+        # Stable numeric IDs survive changing filters.
+        _piece_lists[key]=[(p['id'],p.get('name',p['id']),_CATEGORY_LABELS.get(p.get('category'),p.get('category','')),n+1) for n,p in enumerate(ordered) if (cat=='ALL' or p.get('category')==cat) and (not query or query in p.get('name',p['id']).casefold())] or [('NONE','No matching pieces','Change category or search',0)]
+    return _piece_lists[key]
+
+def filter_changed(self,context):
+    items=piece_items(self,context)
+    self.snaked_piece_name=items[0][0]
+
+def map_items(self,context):
+    global _map_items
+    items=[('AUTO','Selected Map','Use the selected object or active map collection',0)]+[(c.name,c.name,'Place in this map',c['row_id']) for c in maps()]
+    if items!=_map_items:_map_items=items
+    return _map_items
+
+def target_map(context):
+    pick=context.scene.snaked_piece_map
+    return active_map(context) if pick=='AUTO' else next((c for c in maps() if c.name==pick),None)
+
+def transformed_components(piece,rotation):
+    out=[]
+    for src in piece.get('components',[]):
+        kind=(src.get('kind') or src.get('type') or '').upper()
+        if kind not in {'RAMP','BLOCK','WALL','BUTTON','FLOOR','EXIT_DOOR'}:raise ValueError('Unsupported component: '+kind)
+        x,y=int(src.get('x',0)),int(src.get('y',0))
+        for i in range((rotation//90)%4):x,y=-y,x
+        turns_with_piece=kind in {'RAMP','EXIT_DOOR'}
+        out.append(dict(kind=kind,x=x,y=y,layer=int(src.get('layer',0)),rotation=(int(src.get('rotation',0))+rotation)%360 if turns_with_piece else 0,id=src.get('id','')))
+    if not out:raise ValueError('Piece is empty')
+    mx,my=min(c['x'] for c in out),min(c['y'] for c in out)
+    for c in out:c['x']-=mx;c['y']-=my
+    return out
+
+def exit_door_mesh():
+    """A slim, neutral-grey door marker: 0.8 wide, 0.16 deep, 1.4 high."""
+    mesh=bpy.data.meshes.get('Snaked_ExitDoorMesh')
+    if mesh is None:
+        x,y,z=.4,.08,.7
+        mesh=bpy.data.meshes.new('Snaked_ExitDoorMesh')
+        mesh.from_pydata([(sx*x,sy*y,sz*z) for sz in (-1,1)
+                          for sy in (-1,1) for sx in (-1,1)],[],
+                         [(0,2,3,1),(4,5,7,6),(0,1,5,4),
+                          (2,6,7,3),(0,4,6,2),(1,3,7,5)])
+        mesh.update()
+    material=bpy.data.materials.get('Snaked_ExitDoorGrey')
+    if material is None:
+        material=bpy.data.materials.new('Snaked_ExitDoorGrey')
+        material.diffuse_color=(.34,.36,.39,1)
+        material.roughness=.72
+    if not mesh.materials:
+        mesh.materials.append(material)
+    return mesh
+
+def place_map_piece(context,c,piece,x,y,layer=0,rotation=0):
+    comps=transformed_components(piece,rotation)
+    root=root_of(c)
+    context.view_layer.update()
+    inv=root.matrix_world.inverted()
+    occupied={}
+    objects_by_cell={}
+    for o in c.all_objects:
+        kind=o.get('snaked_component')
+        if not kind:continue
+        pos=inv@o.matrix_world.translation
+        # Read actual transforms, so hand-moved pieces are respected.
+        cell=(int(round(pos.x+.5)),int(round(pos.y+.5)),int(o.get('snaked_z',0)))
+        occupied.setdefault(cell,set()).add(kind)
+        objects_by_cell.setdefault(cell,[]).append(o)
+    prepared=[];meshes={}
+    walls_to_remove=set()
+    for item in comps:
+        gx,gy,gl=x+item['x'],y+item['y'],layer+item['layer']
+        kind=item['kind'];cell=(gx,gy,gl)
+        if kind=='EXIT_DOOR':
+            if not (1<=gx<=WIDTH and 1<=gy<=HEIGHT and gl>=0):
+                raise ValueError('Exit door is outside the map')
+            if gx not in (1,WIDTH) and gy not in (1,HEIGHT):
+                raise ValueError('Exit doors must be placed on a border cell')
+        elif not (2<=gx<WIDTH and 2<=gy<HEIGHT and gl>=0):
+            raise ValueError('Piece would cross the border; use interior columns 2-39 and rows 2-21')
+        prior=occupied.get(cell,set())
+        if kind=='EXIT_DOOR':
+            cell_objects=objects_by_cell.get(cell,[])
+            replaceable=[o for o in cell_objects
+                         if o.get('snaked_component')=='WALL'
+                         and o.get('row_border')]
+            if any(o not in replaceable for o in cell_objects):
+                raise ValueError('Border cell (%d, %d) contains something other than its wall'%(gx,gy))
+            walls_to_remove.update(replaceable)
+        elif (kind=='BUTTON' and 'BUTTON' in prior) or (kind!='BUTTON' and any(k!='BUTTON' for k in prior)):
+            raise ValueError('Cell (%d, %d), layer %d is occupied'%(gx,gy,gl))
+        if kind not in meshes:
+            if kind=='EXIT_DOOR':
+                meshes[kind]=exit_door_mesh()
+            else:
+                master=bpy.data.objects.get('WS_Master_'+kind.title()) or bpy.data.objects.get('Master_'+kind.title())
+                if not master or master.type!='MESH':raise ValueError('Missing '+kind.title()+' master asset')
+                meshes[kind]=master.data
+        occupied.setdefault(cell,set()).add(kind)
+        prepared.append((item,gx,gy,gl))
+    for wall in walls_to_remove:
+        bpy.data.objects.remove(wall,do_unlink=True)
+    content=next(ch for ch in c.children if ch.get('row_role')=='content')
+    batch=1+int(c.get('piece_counter',0))
+    made=[]
+    for item,gx,gy,gl in sorted(prepared,key=lambda p:p[0]['kind']=='BUTTON'):
+        kind=item['kind']
+        o=link_object('Map%03d_%s_%03d_%s'%(c['row_id'],piece.get('name',piece['id']),batch,kind.title()),meshes[kind],content,root)
+        z=gl+.5
+        if kind=='EXIT_DOOR':z=gl+.7
+        if kind=='BUTTON':z=gl+.075+(1 if occupied[(gx,gy,gl)] & {'RAMP','BLOCK','WALL','EXIT_DOOR'} else 0)
+        o.location=(gx-.5,gy-.5,z)
+        o.rotation_euler.z=math.radians(item['rotation'])
+        for key,value in {'snaked_component':kind,'snaked_x':gx,'snaked_y':gy,'snaked_z':gl,'snaked_rot':item['rotation'],'snaked_id':item['id'],'snaked_piece':piece['id'],'row_piece_batch':batch}.items():o[key]=value
+        made.append(o)
+    c['piece_counter']=batch
+    activate(context,c)
+    root.select_set(False)
+    for o in made:o.select_set(True)
+    context.view_layer.objects.active=made[0]
+    return made
+
+class SNAKEDROW_OT_refresh_pieces(bpy.types.Operator):
+    bl_idname='snaked_row.refresh_pieces'
+    bl_label='Refresh Piece Library'
+    bl_description='Read saved pieces and current workshop cells; retain a portable catalog inside this blend'
+    def execute(self,context):
+        try:
+            n,warnings=refresh_catalog()
+            context.scene.snaked_piece_category='ALL'
+            filter_changed(context.scene,context)
+            self.report({'WARNING'} if warnings else {'INFO'},'%d pieces loaded%s'%(n,('; '+'; '.join(warnings)) if warnings else ''))
+        except Exception as e:self.report({'ERROR'},str(e));return {'CANCELLED'}
+        return {'FINISHED'}
+
+class SNAKEDROW_OT_place_piece(bpy.types.Operator):
+    bl_idname='snaked_row.place_piece'
+    bl_label='Place Puzzle Piece'
+    bl_options={'REGISTER','UNDO'}
+    at_cursor:BoolProperty(default=False, options={'SKIP_SAVE'})
+    def execute(self,context):
+        s=context.scene;c=target_map(context);piece=_catalog.get(s.snaked_piece_name)
+        if not c or not piece:self.report({'WARNING'},'Choose a map and puzzle piece first');return {'CANCELLED'}
+        x,y=s.snaked_piece_x,s.snaked_piece_y
+        if self.at_cursor:
+            context.view_layer.update()
+            pos=root_of(c).matrix_world.inverted()@s.cursor.location
+            x,y=math.floor(pos.x)+1,math.floor(pos.y)+1
+        try:made=place_map_piece(context,c,piece,x,y,s.snaked_piece_layer,int(s.snaked_piece_rotation))
+        except ValueError as e:self.report({'WARNING'},str(e));return {'CANCELLED'}
+        self.report({'INFO'},'Placed %s (%d components) in %s'%(piece.get('name',piece['id']),len(made),c.name))
+        return {'FINISHED'}
+
+class SNAKEDROW_PT_pieces(bpy.types.Panel):
+    bl_label='Puzzle Pieces'
+    bl_idname='SNAKEDROW_PT_pieces'
+    bl_space_type='VIEW_3D'
+    bl_region_type='UI'
+    bl_category='Snaked Maps'
+    def draw(self,context):
+        l=self.layout;s=context.scene
+        l.prop(s,'snaked_piece_map')
+        c=target_map(context)
+        if c:l.label(text='Target: '+c.name)
+        l.prop(s,'snaked_piece_category')
+        l.prop(s,'snaked_piece_search',icon='VIEWZOOM')
+        l.prop(s,'snaked_piece_name')
+        row=l.row(align=True);row.prop(s,'snaked_piece_x');row.prop(s,'snaked_piece_y')
+        l.prop(s,'snaked_piece_layer')
+        l.prop(s,'snaked_piece_rotation')
+        piece=_catalog.get(s.snaked_piece_name)
+        if piece:
+            comps=transformed_components(piece,int(s.snaked_piece_rotation))
+            l.label(text='Size: %d x %d | %d parts'%(1+max(c['x'] for c in comps),1+max(c['y'] for c in comps),len(comps)))
+        col=l.column(align=True);col.enabled=bool(c and piece)
+        col.operator('snaked_row.place_piece',icon='ADD').at_cursor=False
+        col.operator('snaked_row.place_piece',text='Place at 3D Cursor',icon='PIVOT_CURSOR').at_cursor=True
+        l.operator('snaked_row.refresh_pieces',icon='FILE_REFRESH')
+        l.label(text='Column / row = bottom-left cell.')
+        l.label(text='Border and occupied cells are protected.')
+
+PIECE_CLASSES=(SNAKEDROW_OT_refresh_pieces,SNAKEDROW_OT_place_piece,SNAKEDROW_PT_pieces)
+
+def register_piece_props():
+    load_cached_catalog()
+    props={
+        'snaked_piece_category':EnumProperty(name='Category',items=category_items,update=filter_changed),
+        'snaked_piece_search':StringProperty(name='Search',update=filter_changed),
+        'snaked_piece_name':EnumProperty(name='Name',items=piece_items),
+        'snaked_piece_map':EnumProperty(name='Map',items=map_items),
+        'snaked_piece_x':IntProperty(name='Column',default=2,min=1,max=WIDTH),
+        'snaked_piece_y':IntProperty(name='Row',default=2,min=1,max=HEIGHT),
+        'snaked_piece_layer':IntProperty(name='Layer',default=0,min=0,max=20),
+        'snaked_piece_rotation':EnumProperty(name='Rotation',items=[(str(i),str(i)+' degrees','Counterclockwise') for i in (0,90,180,270)])}
+    for name,prop in props.items():setattr(bpy.types.Scene,name,prop)

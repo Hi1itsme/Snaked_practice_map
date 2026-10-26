@@ -1,0 +1,222 @@
+{
+  "id": "ramp_fish_r180",
+  "family_id": "ramp_fish",
+  "base_piece_id": "ramp_fish_r0",
+  "variation_type": "rotate",
+  "variation_index": 2,
+  "is_base_piece": false,
+  "name": "Fish (180)",
+  "category": "ramp_puzzle",
+  "difficulty": 0,
+  "grid_size": [
+    5,
+    6,
+    1
+  ],
+  "components": [
+    {
+      "type": "ramp",
+      "x": 3,
+      "y": 5,
+      "layer": 0,
+      "rotation": 180,
+      "id": ""
+    },
+    {
+      "type": "ramp",
+      "x": 2,
+      "y": 5,
+      "layer": 0,
+      "rotation": 180,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 4,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 4,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "ramp",
+      "x": 1,
+      "y": 5,
+      "layer": 0,
+      "rotation": 180,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 4,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 0,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 0,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 0,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 0,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    }
+  ],
+  "entry_points": [],
+  "exit_points": [],
+  "tags": [
+    "ramp",
+    "fish",
+    "rotate"
+  ],
+  "requirements": [],
+  "effects": [],
+  "constraints": [],
+  "variation_notes": "Rotated 180 deg.",
+  "notes": ""
+}

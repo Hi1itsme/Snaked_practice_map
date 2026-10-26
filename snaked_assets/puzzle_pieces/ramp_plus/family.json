@@ -1,0 +1,23 @@
+{
+  "family_id": "ramp_plus",
+  "family_name": "Plus",
+  "core_idea": "Ramp puzzle 'Plus' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_plus_r0",
+  "variation_ids": [
+    "ramp_plus_r90",
+    "ramp_plus_r180",
+    "ramp_plus_r270"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "plus"
+  ],
+  "notes": ""
+}

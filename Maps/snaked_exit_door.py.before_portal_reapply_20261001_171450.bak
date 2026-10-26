@@ -1,0 +1,348 @@
+"""Standalone exit-door placer for Snaked map-row collections.
+
+Run this text in Blender with Alt+P. It has no dependency on snaked_map_row.py
+or snaked_map_pieces.py. Controls appear in Viewport Sidebar > Snaked Maps.
+"""
+import math
+import bpy
+from bpy.props import BoolProperty, EnumProperty, IntProperty
+from mathutils import Vector
+
+WIDTH, HEIGHT = 40, 22
+ROW = 'Snaked_Map_Row'
+MAP_TAG = 'snaked_row_map'
+CLASS_KEY = 'snaked_exit_door_classes'
+_map_enum_cache = []
+
+
+def row_maps():
+    row = bpy.data.collections.get(ROW)
+    if row is None:
+        return []
+    return sorted((c for c in row.children if c.get(MAP_TAG)),
+                  key=lambda c: int(c.get('row_id', 0)), reverse=True)
+
+
+def map_root(collection):
+    return next((o for o in collection.objects if o.get('row_anchor')), None)
+
+
+def map_content(collection):
+    return next((c for c in collection.children
+                 if c.get('row_role') == 'content'), collection)
+
+
+def map_items(self, context):
+    global _map_enum_cache
+    items = [(c.name, c.name, 'Place the exit door in this map',
+              int(c.get('row_id', index + 1)))
+             for index, c in enumerate(row_maps())]
+    _map_enum_cache = items or [
+        ('NONE', 'No map-row maps found', 'Create a map first', 0)]
+    return _map_enum_cache
+
+
+def door_mesh():
+    mesh = bpy.data.meshes.get('Snaked_ExitDoorMesh')
+    if mesh is None:
+        hx, hy, hz = .4, .08, .7
+        mesh = bpy.data.meshes.new('Snaked_ExitDoorMesh')
+        mesh.from_pydata(
+            [(sx * hx, sy * hy, sz * hz)
+             for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)],
+            [],
+            [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4),
+             (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)],
+        )
+        mesh.update()
+    material = bpy.data.materials.get('Snaked_ExitDoorGrey')
+    if material is None:
+        material = bpy.data.materials.new('Snaked_ExitDoorGrey')
+        material.diffuse_color = (.34, .36, .39, 1.0)
+        material.roughness = .72
+    if not mesh.materials:
+        mesh.materials.append(material)
+    return mesh
+
+
+PORTAL_FACES = {
+    'SINGLE': ((0, 1),),
+    'OPPOSITE': ((0, 1), (0, -1)),
+    'CORNER': ((0, 1), (1, 0)),
+}
+
+
+def portal_material(name, color, glow=0):
+    material = bpy.data.materials.get(name)
+    if material is None:
+        material = bpy.data.materials.new(name)
+    material.diffuse_color = (*color, 1.0)
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+    output = nodes.new('ShaderNodeOutputMaterial')
+    if glow:
+        surface = nodes.new('ShaderNodeEmission')
+        surface.inputs['Color'].default_value = (*color, 1.0)
+        surface.inputs['Strength'].default_value = glow
+    else:
+        surface = nodes.new('ShaderNodeBsdfPrincipled')
+        surface.inputs['Base Color'].default_value = (*color, 1.0)
+        surface.inputs['Metallic'].default_value = .45
+        surface.inputs['Roughness'].default_value = .4
+    material.node_tree.links.new(surface.outputs[0], output.inputs['Surface'])
+    return material
+
+
+def portal_mesh(kind):
+    if kind not in PORTAL_FACES:
+        raise ValueError('Unknown portal variation: ' + str(kind))
+    name = 'Snaked_Portal_' + kind + '_Mesh'
+    mesh = bpy.data.meshes.get(name)
+    if mesh is not None:
+        return mesh
+    vertices, faces, material_indices = [], [], []
+
+    def box(center, size, material_index):
+        cx, cy, cz = center
+        hx, hy, hz = (value / 2 for value in size)
+        start = len(vertices)
+        vertices.extend((cx + sx * hx, cy + sy * hy, cz + sz * hz)
+                        for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1))
+        faces.extend(tuple(start + vertex for vertex in face)
+                     for face in ((0, 2, 3, 1), (4, 5, 7, 6),
+                                  (0, 1, 5, 4), (2, 6, 7, 3),
+                                  (0, 4, 6, 2), (1, 3, 7, 5)))
+        material_indices.extend([material_index] * 6)
+
+    # The dark block occupies the same one-cell volume as the wall it replaces.
+    box((0, 0, 0), (1, 1, 1), 0)
+    for dx, dy in PORTAL_FACES[kind]:
+        if dy:
+            box((0, dy * .516, 0), (.78, .028, .82), 1)
+            box((0, dy * .539, 0), (.62, .028, .66), 2)
+            box((0, dy * .302, .517), (.17, .43, .025), 2)
+        else:
+            box((dx * .516, 0, 0), (.028, .78, .82), 1)
+            box((dx * .539, 0, 0), (.028, .62, .66), 2)
+            box((dx * .302, 0, .517), (.43, .17, .025), 2)
+    box((0, 0, .517), (.20, .20, .025), 2)
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(vertices, [], faces)
+    mesh.materials.append(portal_material('Snaked_Portal_Block', (.075, .095, .13)))
+    mesh.materials.append(portal_material('Snaked_Portal_Frame', (.24, .31, .38)))
+    mesh.materials.append(portal_material('Snaked_Portal_Glow', (.03, .7, 1), 8))
+    for polygon, index in zip(mesh.polygons, material_indices):
+        polygon.material_index = index
+    mesh.update()
+    return mesh
+
+
+def portal_rotation(kind, column, row, requested):
+    outward = set()
+    if column == 1: outward.add((-1, 0))
+    if column == WIDTH: outward.add((1, 0))
+    if row == 1: outward.add((0, -1))
+    if row == HEIGHT: outward.add((0, 1))
+    if not outward:
+        return requested % 360
+
+    def rotated_faces(angle):
+        faces = PORTAL_FACES[kind]
+        for _ in range((angle // 90) % 4):
+            faces = tuple((-dy, dx) for dx, dy in faces)
+        return set(faces)
+
+    candidates = [angle for angle in (0, 90, 180, 270)
+                  if rotated_faces(angle) & outward]
+    if not candidates:
+        raise ValueError('Portal needs an outward-facing side')
+    if requested in candidates:
+        return requested
+    return max(candidates,
+               key=lambda angle:(len(rotated_faces(angle) & outward),
+                                 -((angle - requested) % 360)))
+
+
+def place_portal(context, collection, kind, column, row, layer=0, rotation=0):
+    if kind not in PORTAL_FACES:
+        raise ValueError('Choose a portal variation')
+    if not (1 <= column <= WIDTH and 1 <= row <= HEIGHT):
+        raise ValueError('Column must be 1-40 and row must be 1-22')
+    root = map_root(collection)
+    if root is None:
+        raise ValueError('The selected map has no Map Origin object')
+    occupants = objects_in_cell(collection, column, row, layer)
+    walls = [obj for obj in occupants
+             if obj.get('snaked_component') == 'WALL']
+    if any(obj not in walls for obj in occupants):
+        raise ValueError('That wall cell contains another component')
+    if not walls:
+        raise ValueError('That cell has no wall to replace')
+    content = map_content(collection)
+    if content is None:
+        raise ValueError('The selected map has no Content collection')
+    facing = portal_rotation(kind, column, row, int(rotation))
+    mesh = portal_mesh(kind)
+    for wall in walls:
+        bpy.data.objects.remove(wall, do_unlink=True)
+    obj = bpy.data.objects.new(
+        'Map%03d_Portal_%s_%02d_%02d' %
+        (int(collection.get('row_id', 0)), kind.title(), column, row), mesh)
+    content.objects.link(obj)
+    obj.parent = root
+    obj.location = (column - .5, row - .5, layer + .5)
+    obj.rotation_euler.z = math.radians(facing)
+    obj['snaked_component'] = 'PORTAL'
+    obj['snaked_portal_kind'] = kind
+    obj['snaked_x'] = column
+    obj['snaked_y'] = row
+    obj['snaked_z'] = layer
+    obj['snaked_rot'] = facing
+    for selected in context.selected_objects:
+        selected.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+    return obj
+
+
+def objects_in_cell(collection, column, row, layer):
+    root = map_root(collection)
+    if root is None:
+        return []
+    bpy.context.view_layer.update()
+    inverse = root.matrix_world.inverted()
+    matches = []
+    for obj in collection.all_objects:
+        if not obj.get('snaked_component'):
+            continue
+        local = inverse @ obj.matrix_world.translation
+        cell = (int(round(local.x + .5)), int(round(local.y + .5)),
+                int(obj.get('snaked_z', 0)))
+        if cell == (column, row, layer):
+            matches.append(obj)
+    return matches
+
+
+def place_exit_door(context, collection, column, row, layer, rotation):
+    if not (1 <= column <= WIDTH and 1 <= row <= HEIGHT):
+        raise ValueError('Column must be 1-40 and row must be 1-22')
+    if column not in (1, WIDTH) and row not in (1, HEIGHT):
+        raise ValueError('Exit doors must be placed on a border cell')
+    root = map_root(collection)
+    if root is None:
+        raise ValueError('The selected map has no Map Origin object')
+    occupants = objects_in_cell(collection, column, row, layer)
+    replaceable = [obj for obj in occupants
+                   if obj.get('snaked_component') == 'WALL'
+                   and obj.get('row_border')]
+    blocked = [obj for obj in occupants if obj not in replaceable]
+    if blocked:
+        raise ValueError('That border cell contains something other than its wall')
+    for wall in replaceable:
+        bpy.data.objects.remove(wall, do_unlink=True)
+    content = map_content(collection)
+    obj = bpy.data.objects.new(
+        'Map%03d_Exit_Door_%02d_%02d' %
+        (int(collection.get('row_id', 0)), column, row), door_mesh())
+    content.objects.link(obj)
+    obj.parent = root
+    obj.location = (column - .5, row - .5, layer + .7)
+    obj.rotation_euler.z = math.radians(rotation)
+    obj['snaked_component'] = 'EXIT_DOOR'
+    obj['snaked_piece'] = 'special_exit_door'
+    obj['snaked_id'] = 'exit'
+    obj['snaked_x'] = column
+    obj['snaked_y'] = row
+    obj['snaked_z'] = layer
+    obj['snaked_rot'] = rotation
+    for selected in context.selected_objects:
+        selected.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+    return obj
+
+
+class SNAKEDEXIT_OT_place(bpy.types.Operator):
+    bl_idname = 'snaked_exit.place'
+    bl_label = 'Place Exit Door'
+    bl_description = 'Place one thin grey exit-door marker in the chosen cell'
+    bl_options = {'REGISTER', 'UNDO'}
+    at_cursor: BoolProperty(default=False, options={'SKIP_SAVE'})
+
+    def execute(self, context):
+        scene = context.scene
+        collection = bpy.data.collections.get(scene.snaked_exit_map)
+        if collection is None or not collection.get(MAP_TAG):
+            self.report({'WARNING'}, 'Choose a map first')
+            return {'CANCELLED'}
+        column, row = scene.snaked_exit_column, scene.snaked_exit_row
+        if self.at_cursor:
+            root = map_root(collection)
+            if root is None:
+                self.report({'WARNING'}, 'The selected map has no Map Origin')
+                return {'CANCELLED'}
+            local = root.matrix_world.inverted() @ scene.cursor.location
+            column, row = math.floor(local.x) + 1, math.floor(local.y) + 1
+        try:
+            obj = place_exit_door(
+                context, collection, column, row, scene.snaked_exit_layer,
+                int(scene.snaked_exit_rotation))
+        except ValueError as error:
+            self.report({'WARNING'}, str(error))
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Placed ' + obj.name)
+        return {'FINISHED'}
+
+
+class SNAKEDEXIT_PT_panel(bpy.types.Panel):
+    bl_label = 'Exit Door'
+    bl_idname = 'SNAKEDEXIT_PT_panel'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Snaked Maps'
+
+    def draw(self, context):
+        layout, scene = self.layout, context.scene
+        layout.label(text='Thin grey door | one cell')
+        layout.prop(scene, 'snaked_exit_map')
+        row = layout.row(align=True)
+        row.prop(scene, 'snaked_exit_column')
+        row.prop(scene, 'snaked_exit_row')
+        layout.prop(scene, 'snaked_exit_layer')
+        layout.prop(scene, 'snaked_exit_rotation')
+        layout.operator('snaked_exit.place', icon='MESH_CUBE').at_cursor = False
+        layout.operator('snaked_exit.place', text='Place at 3D Cursor',
+                        icon='PIVOT_CURSOR').at_cursor = True
+        layout.label(text='Size: 0.8 x 0.16 x 1.4')
+        layout.label(text='Replaces one wall on the map border.')
+
+
+CLASSES = (SNAKEDEXIT_OT_place, SNAKEDEXIT_PT_panel)
+
+
+def register():
+    bpy.app.driver_namespace['snaked_place_portal'] = place_portal
+    for old in reversed(bpy.app.driver_namespace.get(CLASS_KEY, ())):
+        try:
+            bpy.utils.unregister_class(old)
+        except RuntimeError:
+            pass
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
+    bpy.app.driver_namespace[CLASS_KEY] = CLASSES
+    bpy.types.Scene.snaked_exit_map = EnumProperty(name='Map', items=map_items)
+    bpy.types.Scene.snaked_exit_column = IntProperty(
+        name='Column', default=2, min=1, max=WIDTH)
+    bpy.types.Scene.snaked_exit_row = IntProperty(
+        name='Row', default=2, min=1, max=HEIGHT)
+    bpy.types.Scene.snaked_exit_layer = IntProperty(
+        name='Layer', default=0, min=0, max=20)
+    bpy.types.Scene.snaked_exit_rotation = EnumProperty(
+        name='Rotation',
+        items=[(str(value), str(value) + ' degrees', 'Rotate the thin side')
+               for value in (0, 90, 180, 270)])
+
+
+if __name__ == '__main__':
+    register()

@@ -1,0 +1,23 @@
+{
+  "family_id": "ramp_short_top",
+  "family_name": "Short Top",
+  "core_idea": "Ramp puzzle 'Short Top' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_short_top_r0",
+  "variation_ids": [
+    "ramp_short_top_r90",
+    "ramp_short_top_r180",
+    "ramp_short_top_r270"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "short_top"
+  ],
+  "notes": ""
+}

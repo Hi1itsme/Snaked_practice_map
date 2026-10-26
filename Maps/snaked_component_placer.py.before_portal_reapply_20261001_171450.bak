@@ -1,0 +1,391 @@
+"""Standalone placer for individual Snaked buttons, ramps, walls, and rails.
+
+Run in Blender with Alt+P. Controls appear in Viewport Sidebar > Snaked Maps.
+The script only needs map-row collections already stored in the blend file.
+"""
+import math
+import bpy
+from bpy_extras import view3d_utils
+from mathutils import Vector
+from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
+                       StringProperty)
+
+WIDTH, HEIGHT = 40, 22
+ROW = 'Snaked_Map_Row'
+MAP_TAG = 'snaked_row_map'
+RAIL_PUZZLE_ROW = 'Snaked_Rail_Puzzle_Row'
+RAIL_PUZZLE_TAG = 'snaked_rail_puzzle'
+CLASS_KEY = 'snaked_component_placer_classes'
+SOLIDS = {'BLOCK', 'FLOOR', 'RAMP', 'WALL', 'EXIT_DOOR', 'PORTAL'}
+_map_enum_cache = []
+
+
+def row_maps():
+    row = bpy.data.collections.get(ROW)
+    if row is None:
+        return []
+    return sorted((c for c in row.children if c.get(MAP_TAG)),
+                  key=lambda c: int(c.get('row_id', 0)), reverse=True)
+
+
+def rail_puzzles():
+    row = bpy.data.collections.get(RAIL_PUZZLE_ROW)
+    if row is None:
+        return []
+    return sorted((c for c in row.children if c.get(RAIL_PUZZLE_TAG)),
+                  key=lambda c: int(c.get('rail_puzzle_id', 0)), reverse=True)
+
+
+def map_root(collection):
+    return next((o for o in collection.objects if o.get('row_anchor')), None)
+
+
+def map_content(collection):
+    return next((c for c in collection.children
+                 if c.get('row_role') == 'content'), collection)
+
+
+def map_items(self, context):
+    global _map_enum_cache
+    maps = [
+        (c.name, c.name, 'Place in this map', int(c.get('row_id', index + 1)))
+        for index, c in enumerate(row_maps())
+    ]
+    puzzle_items = [
+        (c.name, c.name + ' [Rails Only]', 'Place rails in this 3x3 puzzle',
+         10000 + int(c.get('rail_puzzle_id', index + 1)))
+        for index, c in enumerate(rail_puzzles())
+    ]
+    _map_enum_cache = maps + puzzle_items or [
+        ('NONE', 'No placement areas found', 'Create a map or rail puzzle first', 0)]
+    return _map_enum_cache
+
+
+def objects_in_cell(collection, column, row, layer):
+    root = map_root(collection)
+    if root is None:
+        return []
+    bpy.context.view_layer.update()
+    inverse = root.matrix_world.inverted()
+    matches = []
+    for obj in collection.all_objects:
+        kind = obj.get('snaked_component')
+        if not kind:
+            continue
+        local = inverse @ obj.matrix_world.translation
+        cell = (int(round(local.x + .5)), int(round(local.y + .5)),
+                int(obj.get('snaked_z', 0)))
+        if cell == (column, row, layer):
+            matches.append(obj)
+    return matches
+
+
+def master_for(kind):
+    title = kind.title()
+    master = (bpy.data.objects.get('WS_Master_' + title)
+              or bpy.data.objects.get('Master_' + title))
+    if master is None or master.type != 'MESH':
+        raise ValueError('Missing the project master object for ' + title)
+    return master
+
+
+def place_component(context, collection, kind, column, row, layer,
+                    rotation=0, button_id=''):
+    if collection.get(RAIL_PUZZLE_TAG) and not kind.startswith('RAIL_'):
+        raise ValueError('Rail puzzle blocks accept rail components only')
+    if kind.startswith('RAIL_'):
+        rail_kind = kind.removeprefix('RAIL_')
+        placer = bpy.app.driver_namespace.get('snaked_place_rail')
+        if placer is None:
+            raise ValueError('Rail assets are not loaded; run the map toolkit again')
+        return placer(context, collection, rail_kind, column, row, layer, rotation)
+    if kind.startswith('PORTAL_'):
+        placer = bpy.app.driver_namespace.get('snaked_place_portal')
+        if placer is None:
+            raise ValueError('Portal tools are not loaded; run the map toolkit again')
+        return placer(context, collection, kind.removeprefix('PORTAL_'),
+                      int(column), int(row), layer, rotation)
+    if abs(column - round(column)) > 0.001 or abs(row - round(row)) > 0.001:
+        raise ValueError('This component uses whole-number columns and rows')
+    column, row = int(round(column)), int(round(row))
+    if not (1 <= column <= WIDTH and 1 <= row <= HEIGHT):
+        raise ValueError('Column must be 1-40 and row must be 1-22')
+    on_border = column in (1, WIDTH) or row in (1, HEIGHT)
+    if on_border and kind != 'WALL':
+        raise ValueError('Only walls can be placed on border cells')
+    root = map_root(collection)
+    if root is None:
+        raise ValueError('The selected map has no Map Origin object')
+
+    occupants = objects_in_cell(collection, column, row, layer)
+    protected = [o for o in occupants
+                 if o.get('snaked_component') in {'EXIT_DOOR', 'PORTAL'}]
+    if protected:
+        raise ValueError('That cell contains an exit door or portal')
+
+    if kind == 'BUTTON':
+        replaced = [o for o in occupants
+                    if o.get('snaked_component') == 'BUTTON']
+    else:
+        replaced = [o for o in occupants
+                    if o.get('snaked_component') in SOLIDS]
+    remaining = [o for o in occupants if o not in replaced]
+    supporting_solid = any(o.get('snaked_component') in SOLIDS
+                           for o in remaining)
+    master = master_for(kind)
+    for obj in replaced:
+        bpy.data.objects.remove(obj, do_unlink=True)
+    content = map_content(collection)
+    name = 'Map%03d_%s_%02d_%02d' % (
+        int(collection.get('row_id', 0)), kind.title(), column, row)
+    obj = bpy.data.objects.new(name, master.data)
+    content.objects.link(obj)
+    obj.parent = root
+    z = layer + (1.075 if kind == 'BUTTON' and supporting_solid
+                 else .075 if kind == 'BUTTON' else .5)
+    obj.location = (column - .5, row - .5, z)
+    obj.rotation_euler.z = math.radians(rotation if kind == 'RAMP' else 0)
+    obj['snaked_component'] = kind
+    obj['snaked_x'] = column
+    obj['snaked_y'] = row
+    obj['snaked_z'] = layer
+    if kind == 'RAMP':
+        obj['snaked_rot'] = rotation
+    if kind == 'BUTTON':
+        obj['snaked_id'] = button_id
+
+    # A button already in the cell follows a newly placed solid upward.
+    if kind in {'RAMP', 'WALL'}:
+        for overlay in remaining:
+            if overlay.get('snaked_component') == 'BUTTON':
+                overlay.location.z = layer + 1.075
+    for selected in context.selected_objects:
+        selected.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+    return obj
+
+
+class SNAKEDCOMP_OT_place(bpy.types.Operator):
+    bl_idname = 'snaked_component.place'
+    bl_label = 'Place Component'
+    bl_description = 'Place one component in the selected map cell'
+    bl_options = {'REGISTER', 'UNDO'}
+    at_cursor: BoolProperty(default=False, options={'SKIP_SAVE'})
+
+    def execute(self, context):
+        scene = context.scene
+        collection = bpy.data.collections.get(scene.snaked_component_map)
+        if collection is None or not (collection.get(MAP_TAG) or
+                                      collection.get(RAIL_PUZZLE_TAG)):
+            self.report({'WARNING'}, 'Choose a map or rail puzzle first')
+            return {'CANCELLED'}
+        corner = scene.snaked_component_kind in {
+            'RAIL_CORNER', 'RAIL_CORNER_MIRROR'}
+        column, row = ((scene.snaked_component_corner_column,
+                        scene.snaked_component_corner_row) if corner else
+                       (scene.snaked_component_column,
+                        scene.snaked_component_row))
+        if self.at_cursor:
+            root = map_root(collection)
+            if root is None:
+                self.report({'WARNING'}, 'The selected map has no Map Origin')
+                return {'CANCELLED'}
+            context.view_layer.update()
+            local = root.matrix_world.inverted() @ scene.cursor.location
+            column, row = math.floor(local.x) + 1, math.floor(local.y) + 1
+        try:
+            obj = place_component(
+                context, collection, scene.snaked_component_kind,
+                column, row, scene.snaked_component_layer,
+                int(scene.snaked_component_rotation),
+                scene.snaked_component_button_id.strip())
+        except ValueError as error:
+            self.report({'WARNING'}, str(error))
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Placed ' + obj.name)
+        return {'FINISHED'}
+
+
+def component_cell_under_mouse(context, event, collection, layer, corner):
+    region = next((r for r in context.area.regions if r.type == 'WINDOW'), None)
+    if region is None:
+        return None
+    point = (event.mouse_x - region.x, event.mouse_y - region.y)
+    if not (0 <= point[0] < region.width and 0 <= point[1] < region.height):
+        return None
+    origin = view3d_utils.region_2d_to_origin_3d(
+        region, context.space_data.region_3d, point)
+    direction = view3d_utils.region_2d_to_vector_3d(
+        region, context.space_data.region_3d, point)
+    if abs(direction.z) < 1e-8:
+        return None
+    root = map_root(collection)
+    if root is None:
+        return None
+    plane = root.matrix_world @ Vector((0, 0, float(layer)))
+    distance = (plane.z - origin.z) / direction.z
+    if distance < 0:
+        return None
+    local = root.matrix_world.inverted() @ (origin + direction * distance)
+    size = collection.get('grid_size', [WIDTH, HEIGHT, 1])
+    if not (0 <= local.x < size[0] and 0 <= local.y < size[1]):
+        return None
+    if corner:
+        return (round((local.x + .5) * 2) / 2,
+                round((local.y + .5) * 2) / 2)
+    return math.floor(local.x) + 1, math.floor(local.y) + 1
+
+
+class SNAKEDCOMP_OT_click_place(bpy.types.Operator):
+    bl_idname = 'snaked_component.click_place'
+    bl_label = 'Click to Place Components'
+    bl_description = 'Left-click cells repeatedly; right-click or Esc to stop'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        collection = bpy.data.collections.get(context.scene.snaked_component_map)
+        if collection is None or not (collection.get(MAP_TAG) or
+                                      collection.get(RAIL_PUZZLE_TAG)):
+            self.report({'WARNING'}, 'Choose a map or rail puzzle first')
+            return {'CANCELLED'}
+        self._map_name = collection.name
+        self._area = context.area
+        self._area.header_text_set(
+            'Individual Components: left-click a cell; right-click or Esc to stop')
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
+            self._area.header_text_set(None)
+            return {'FINISHED'}
+        if event.type not in {'MOUSEMOVE', 'LEFTMOUSE'}:
+            return {'PASS_THROUGH'}
+        collection = bpy.data.collections.get(self._map_name)
+        if collection is None:
+            self._area.header_text_set(None)
+            return {'CANCELLED'}
+        scene = context.scene
+        kind = scene.snaked_component_kind
+        corner = kind in {'RAIL_CORNER', 'RAIL_CORNER_MIRROR'}
+        cell = component_cell_under_mouse(
+            context, event, collection, scene.snaked_component_layer, corner)
+        if cell is None:
+            return {'PASS_THROUGH'}
+        if event.type == 'MOUSEMOVE':
+            self._area.header_text_set(
+                'Individual Components: left-click %.1f, %.1f; right-click or Esc to stop' % cell)
+            return {'RUNNING_MODAL'}
+        if event.value != 'PRESS':
+            return {'RUNNING_MODAL'}
+        if corner:
+            scene.snaked_component_corner_column = cell[0]
+            scene.snaked_component_corner_row = cell[1]
+        else:
+            scene.snaked_component_column = cell[0]
+            scene.snaked_component_row = cell[1]
+        try:
+            place_component(context, collection, kind, *cell,
+                            scene.snaked_component_layer,
+                            int(scene.snaked_component_rotation),
+                            scene.snaked_component_button_id.strip())
+        except ValueError as error:
+            self.report({'WARNING'}, str(error))
+        self._area.tag_redraw()
+        return {'RUNNING_MODAL'}
+
+
+class SNAKEDCOMP_PT_panel(bpy.types.Panel):
+    bl_label = 'Individual Components'
+    bl_idname = 'SNAKEDCOMP_PT_panel'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Snaked Maps'
+
+    def draw(self, context):
+        layout, scene = self.layout, context.scene
+        layout.prop(scene, 'snaked_component_map')
+        layout.prop(scene, 'snaked_component_kind')
+        row = layout.row(align=True)
+        if scene.snaked_component_kind in {'RAIL_CORNER',
+                                           'RAIL_CORNER_MIRROR'}:
+            row.prop(scene, 'snaked_component_corner_column', text='Column')
+            row.prop(scene, 'snaked_component_corner_row', text='Row')
+        else:
+            row.prop(scene, 'snaked_component_column')
+            row.prop(scene, 'snaked_component_row')
+        layout.prop(scene, 'snaked_component_layer')
+        rotation = layout.row()
+        rotation.enabled = (scene.snaked_component_kind == 'RAMP' or
+                            scene.snaked_component_kind.startswith('RAIL_') or
+                            scene.snaked_component_kind.startswith('PORTAL_'))
+        rotation.prop(scene, 'snaked_component_rotation')
+        button = layout.row()
+        button.enabled = scene.snaked_component_kind == 'BUTTON'
+        button.prop(scene, 'snaked_component_button_id')
+        layout.operator('snaked_component.place', icon='ADD').at_cursor = False
+        layout.operator('snaked_component.place', text='Place at 3D Cursor',
+                        icon='PIVOT_CURSOR').at_cursor = True
+        layout.operator('snaked_component.click_place',
+                        text='Click to Place in View', icon='RESTRICT_SELECT_OFF')
+        layout.label(text='Left-click cells; right-click or Esc to stop.')
+        layout.label(text='Buttons can sit on ramps or walls.')
+        layout.label(text='Portals replace a wall anywhere in the map.')
+        layout.label(text='Rails use interior cells.')
+
+
+CLASSES = (SNAKEDCOMP_OT_place, SNAKEDCOMP_OT_click_place,
+           SNAKEDCOMP_PT_panel)
+
+
+def register():
+    for old in reversed(bpy.app.driver_namespace.get(CLASS_KEY, ())):
+        try:
+            bpy.utils.unregister_class(old)
+        except RuntimeError:
+            pass
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
+    bpy.app.driver_namespace[CLASS_KEY] = CLASSES
+    bpy.types.Scene.snaked_component_map = EnumProperty(
+        name='Map', items=map_items)
+    bpy.types.Scene.snaked_component_kind = EnumProperty(
+        name='Component',
+        items=[('BUTTON', 'Button', 'Place one button'),
+               ('RAMP', 'Ramp', 'Place one directional ramp'),
+               ('WALL', 'Wall', 'Place one wall'),
+               ('PORTAL_SINGLE', 'Portal - Single Side',
+                'Replace a wall with a portal on one face'),
+               ('PORTAL_OPPOSITE', 'Portal - Opposite Sides',
+                'Replace a wall with opposite-facing portals'),
+               ('PORTAL_CORNER', 'Portal - 90 Degree',
+                'Replace a wall with portals on adjacent faces'),
+               ('RAIL_STRAIGHT', 'Rail - Straight', 'Place one straight rail'),
+               ('RAIL_CORNER', 'Rail - 90 Degree', 'Place one corner rail'),
+               ('RAIL_CORNER_MIRROR', 'Rail - 90 Mirror',
+                'Place the mirrored 90 degree rail'),
+               ('RAIL_END', 'Rail - End', 'Place one rail end'),
+              ])
+    bpy.types.Scene.snaked_component_column = IntProperty(
+        name='Column', default=2, min=1, max=WIDTH)
+    bpy.types.Scene.snaked_component_row = IntProperty(
+        name='Row', default=2, min=1, max=HEIGHT)
+    bpy.types.Scene.snaked_component_corner_column = FloatProperty(
+        name='Column', default=2.0, min=1.0, max=WIDTH,
+        step=50, precision=1)
+    bpy.types.Scene.snaked_component_corner_row = FloatProperty(
+        name='Row', default=2.0, min=1.0, max=HEIGHT,
+        step=50, precision=1)
+    bpy.types.Scene.snaked_component_layer = IntProperty(
+        name='Layer', default=0, min=0, max=20)
+    bpy.types.Scene.snaked_component_rotation = EnumProperty(
+        name='Rotation',
+        items=[(str(value), str(value) + ' degrees', 'Component direction')
+               for value in (0, 90, 180, 270)])
+    bpy.types.Scene.snaked_component_button_id = StringProperty(
+        name='Button ID', default='button')
+
+
+if __name__ == '__main__':
+    register()

@@ -1,0 +1,27 @@
+{
+  "family_id": "ramp_l",
+  "family_name": "L",
+  "core_idea": "Ramp puzzle 'L' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_l_r0",
+  "variation_ids": [
+    "ramp_l_r90",
+    "ramp_l_r180",
+    "ramp_l_r270",
+    "ramp_l_r0_m",
+    "ramp_l_r90_m",
+    "ramp_l_r180_m",
+    "ramp_l_r270_m"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "l"
+  ],
+  "notes": ""
+}

@@ -1,0 +1,23 @@
+{
+  "family_id": "ramp_cube",
+  "family_name": "Cube",
+  "core_idea": "Ramp puzzle 'Cube' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_cube_r0",
+  "variation_ids": [
+    "ramp_cube_r90",
+    "ramp_cube_r180",
+    "ramp_cube_r270"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "cube"
+  ],
+  "notes": ""
+}

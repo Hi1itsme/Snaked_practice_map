@@ -1,0 +1,23 @@
+{
+  "family_id": "ramp_u",
+  "family_name": "U",
+  "core_idea": "Ramp puzzle 'U' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_u_r0",
+  "variation_ids": [
+    "ramp_u_r90",
+    "ramp_u_r180",
+    "ramp_u_r270"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "u"
+  ],
+  "notes": ""
+}

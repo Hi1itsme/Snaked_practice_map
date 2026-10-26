@@ -1,0 +1,27 @@
+{
+  "family_id": "ramp_overhang",
+  "family_name": "Overhang",
+  "core_idea": "Ramp puzzle 'Overhang' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_overhang_r0",
+  "variation_ids": [
+    "ramp_overhang_r90",
+    "ramp_overhang_r180",
+    "ramp_overhang_r270",
+    "ramp_overhang_r0_m",
+    "ramp_overhang_r90_m",
+    "ramp_overhang_r180_m",
+    "ramp_overhang_r270_m"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "overhang"
+  ],
+  "notes": ""
+}

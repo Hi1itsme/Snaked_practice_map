@@ -1,0 +1,45 @@
+{
+  "version": "0.1",
+  "levels": [
+    {
+      "id": "world_01_level_001",
+      "name": "Classic",
+      "world": 1,
+      "level_number": 1,
+      "path": "levels/world_01/level_001",
+      "status": "draft"
+    },
+    {
+      "id": "world_02_level_001",
+      "name": "escape",
+      "world": 2,
+      "level_number": 1,
+      "path": "levels/world_02/level_001",
+      "status": "draft"
+    },
+    {
+      "id": "world_03_level_001",
+      "name": "ramp",
+      "world": 3,
+      "level_number": 1,
+      "path": "levels/world_03/level_001",
+      "status": "draft"
+    },
+    {
+      "id": "world_04_level_001",
+      "name": "Button A",
+      "world": 4,
+      "level_number": 1,
+      "path": "levels/world_04/level_001",
+      "status": "draft"
+    },
+    {
+      "id": "world_05_level_001",
+      "name": "Button B",
+      "world": 5,
+      "level_number": 1,
+      "path": "levels/world_05/level_001",
+      "status": "draft"
+    }
+  ]
+}

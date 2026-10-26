@@ -1,0 +1,21 @@
+{
+  "family_id": "ramp_big_square",
+  "family_name": "Big Square",
+  "core_idea": "Ramp puzzle 'Big Square' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_big_square_r0",
+  "variation_ids": [
+    "ramp_big_square_r180"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "big_square"
+  ],
+  "notes": ""
+}

@@ -1,0 +1,21 @@
+{
+  "family_id": "ramp_rectangle",
+  "family_name": "Rectangle",
+  "core_idea": "Ramp puzzle 'Rectangle' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_rectangle_r0",
+  "variation_ids": [
+    "ramp_rectangle_r90"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "rectangle"
+  ],
+  "notes": ""
+}

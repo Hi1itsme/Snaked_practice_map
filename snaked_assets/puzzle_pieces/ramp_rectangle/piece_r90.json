@@ -1,0 +1,254 @@
+{
+  "id": "ramp_rectangle_r90",
+  "family_id": "ramp_rectangle",
+  "base_piece_id": "ramp_rectangle_r0",
+  "variation_type": "rotate",
+  "variation_index": 1,
+  "is_base_piece": false,
+  "name": "Rectangle (90)",
+  "category": "ramp_puzzle",
+  "difficulty": 0,
+  "grid_size": [
+    6,
+    6,
+    1
+  ],
+  "components": [
+    {
+      "type": "ramp",
+      "x": 5,
+      "y": 0,
+      "layer": 0,
+      "rotation": 90,
+      "id": ""
+    },
+    {
+      "type": "ramp",
+      "x": 5,
+      "y": 1,
+      "layer": 0,
+      "rotation": 90,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 4,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 4,
+      "y": 5,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 5,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 5,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 5,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 4,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 1,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 0,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 3,
+      "y": 4,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 4,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 3,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 1,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "block",
+      "x": 2,
+      "y": 2,
+      "layer": 0,
+      "rotation": 0,
+      "id": ""
+    },
+    {
+      "type": "ramp",
+      "x": 0,
+      "y": 5,
+      "layer": 0,
+      "rotation": 270,
+      "id": ""
+    },
+    {
+      "type": "ramp",
+      "x": 0,
+      "y": 4,
+      "layer": 0,
+      "rotation": 270,
+      "id": ""
+    }
+  ],
+  "entry_points": [],
+  "exit_points": [],
+  "tags": [
+    "ramp",
+    "rectangle",
+    "rotate"
+  ],
+  "requirements": [],
+  "effects": [],
+  "constraints": [],
+  "variation_notes": "Rotated 90 deg.",
+  "notes": ""
+}

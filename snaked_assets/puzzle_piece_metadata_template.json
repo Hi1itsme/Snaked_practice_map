@@ -1,0 +1,19 @@
+{
+  "id": "",
+  "name": "",
+  "category": "",
+  "difficulty": 0,
+  "grid_size": [
+    0,
+    0,
+    0
+  ],
+  "components": [],
+  "entry_points": [],
+  "exit_points": [],
+  "tags": [],
+  "requirements": [],
+  "effects": [],
+  "constraints": [],
+  "notes": ""
+}

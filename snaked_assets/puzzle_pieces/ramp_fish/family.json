@@ -1,0 +1,27 @@
+{
+  "family_id": "ramp_fish",
+  "family_name": "Fish",
+  "core_idea": "Ramp puzzle 'Fish' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_fish_r0",
+  "variation_ids": [
+    "ramp_fish_r90",
+    "ramp_fish_r180",
+    "ramp_fish_r270",
+    "ramp_fish_r0_m",
+    "ramp_fish_r90_m",
+    "ramp_fish_r180_m",
+    "ramp_fish_r270_m"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "fish"
+  ],
+  "notes": ""
+}

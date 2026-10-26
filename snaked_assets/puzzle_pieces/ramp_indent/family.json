@@ -1,0 +1,27 @@
+{
+  "family_id": "ramp_indent",
+  "family_name": "Indent",
+  "core_idea": "Ramp puzzle 'Indent' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_indent_r0",
+  "variation_ids": [
+    "ramp_indent_r90",
+    "ramp_indent_r180",
+    "ramp_indent_r270",
+    "ramp_indent_r0_m",
+    "ramp_indent_r90_m",
+    "ramp_indent_r180_m",
+    "ramp_indent_r270_m"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "indent"
+  ],
+  "notes": ""
+}

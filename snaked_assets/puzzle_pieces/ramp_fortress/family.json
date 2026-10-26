@@ -1,0 +1,23 @@
+{
+  "family_id": "ramp_fortress",
+  "family_name": "Fortress",
+  "core_idea": "Ramp puzzle 'Fortress' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_fortress_r0",
+  "variation_ids": [
+    "ramp_fortress_r90",
+    "ramp_fortress_r180",
+    "ramp_fortress_r270"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "fortress"
+  ],
+  "notes": ""
+}

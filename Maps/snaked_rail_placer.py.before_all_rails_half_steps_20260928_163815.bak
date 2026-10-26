@@ -1,0 +1,340 @@
+"""Import and place the four Snaked rail assets on map-row maps.
+
+Run with Alt+P. Rail meshes are appended once and retained in the blend file.
+Rail and Rail_90 are normalized from centimetre-sized source geometry.
+"""
+import math
+from pathlib import Path
+import bpy
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
+
+WIDTH, HEIGHT = 40, 22
+ROW = 'Snaked_Map_Row'
+MAP_TAG = 'snaked_row_map'
+RAIL_PUZZLE_ROW = 'Snaked_Rail_Puzzle_Row'
+RAIL_PUZZLE_TAG = 'snaked_rail_puzzle'
+CLASS_KEY = 'snaked_rail_placer_classes'
+ASSET_COLLECTION = 'Snaked_Rail_Assets'
+STEEL_MATERIAL = 'Snaked_RailSteel'
+_map_enum_cache = []
+
+RAILS = {
+    'STRAIGHT': {
+        'label':'Straight Rail',
+        'path':Path('C:/Users/slevi/Desktop/Blender/Assets/Rail_Asset.blend'),
+        'source':'Rail',
+        'master':'Snaked_RailMaster_Straight',
+        'scale':1.0,
+        'version':'centered_one_cell_v1',
+    },
+    'CORNER': {
+        'label':'90 Degree Rail',
+        'path':Path('C:/Users/slevi/Desktop/Blender/Assets/90Rail_Asset.blend'),
+        'source':'Rail_90',
+        'master':'Snaked_RailMaster_90',
+        'scale':.01,
+    },
+    'CORNER_MIRROR': {
+        'label':'90 Degree Rail Mirror',
+        'path':Path('C:/Users/slevi/Desktop/Blender/Assets/90Rail_Mirror_Asset.blend'),
+        'source':'Rail_90_Mirror',
+        'master':'Snaked_RailMaster_90_Mirror',
+        'scale':.01,
+        'version':'mirror_v1',
+    },
+    'END': {
+        'label':'Rail End',
+        'path':Path('C:/Users/slevi/Desktop/Blender/Assets/Rail_End_Asset.blend'),
+        'source':'Rail_End',
+        'master':'Snaked_RailMaster_End',
+        'scale':1.0,
+        'version':'centered_one_cell_v1',
+    },
+}
+
+
+def row_maps():
+    row=bpy.data.collections.get(ROW)
+    if row is None:return []
+    return sorted((c for c in row.children if c.get(MAP_TAG)),
+                  key=lambda c:int(c.get('row_id',0)),reverse=True)
+
+
+def rail_puzzles():
+    row=bpy.data.collections.get(RAIL_PUZZLE_ROW)
+    if row is None:return []
+    return sorted((c for c in row.children if c.get(RAIL_PUZZLE_TAG)),
+                  key=lambda c:int(c.get('rail_puzzle_id',0)),reverse=True)
+
+
+def map_root(collection):
+    return next((o for o in collection.objects if o.get('row_anchor')),None)
+
+
+def map_content(collection):
+    return next((c for c in collection.children
+                 if c.get('row_role')=='content'),collection)
+
+
+def map_items(self,context):
+    global _map_enum_cache
+    maps=[(c.name,c.name,'Place rail in this map',
+           int(c.get('row_id',index+1)))
+          for index,c in enumerate(row_maps())]
+    puzzle_items=[(c.name,c.name+' [Rails Only]','Place in this 3x3 rail puzzle',
+                   10000+int(c.get('rail_puzzle_id',index+1)))
+                  for index,c in enumerate(rail_puzzles())]
+    _map_enum_cache=maps+puzzle_items or [
+        ('NONE','No placement areas found','Create a map or rail puzzle first',0)]
+    return _map_enum_cache
+
+
+def asset_collection():
+    collection=bpy.data.collections.get(ASSET_COLLECTION)
+    if collection is None:
+        collection=bpy.data.collections.new(ASSET_COLLECTION)
+        bpy.context.scene.collection.children.link(collection)
+    collection.hide_viewport=True
+    collection.hide_render=True
+    return collection
+
+
+def steel_material():
+    material=bpy.data.materials.get(STEEL_MATERIAL)
+    if material is None:
+        material=bpy.data.materials.new(STEEL_MATERIAL)
+        material.diffuse_color=(.20,.23,.26,1.0)
+        material.metallic=.65
+        material.roughness=.32
+    return material
+
+
+def import_master(kind,force=False):
+    spec=RAILS[kind]
+    current=bpy.data.objects.get(spec['master'])
+    expected_version=spec.get('version')
+    if (current is not None and not force and
+            (expected_version is None or
+             current.get('snaked_rail_asset_version')==expected_version)):
+        return current
+    if not spec['path'].is_file():
+        if current is not None:
+            return current
+        raise ValueError('Rail source file not found: '+str(spec['path']))
+    with bpy.data.libraries.load(str(spec['path']),link=False) as (source,target):
+        if spec['source'] not in source.objects:
+            raise ValueError("Object '%s' not found in %s"%
+                             (spec['source'],spec['path'].name))
+        target.objects=[spec['source']]
+    master=target.objects[0]
+    placed=[obj for obj in bpy.data.objects
+            if obj.get('snaked_component')=='RAIL'
+            and obj.get('snaked_rail_type')==kind]
+    if current is not None:
+        bpy.data.objects.remove(current,do_unlink=True)
+    master.name=spec['master']
+    master.scale=(spec['scale'],)*3
+    master['snaked_rail_master']=kind
+    master['snaked_rail_base_rotation']=float(master.rotation_euler.z)
+    if expected_version is not None:
+        master['snaked_rail_asset_version']=expected_version
+    master.hide_render=True
+    master.hide_select=True
+    mesh=master.data
+    material=steel_material()
+    if hasattr(mesh,'materials') and not mesh.materials:
+        mesh.materials.append(material)
+    asset_collection().objects.link(master)
+    for obj in placed:
+        obj.data=master.data
+        obj.scale=master.scale
+        obj.rotation_euler.z=(
+            float(master.get('snaked_rail_base_rotation',0.0))+
+            math.radians(int(obj.get('snaked_rot',0))))
+    return master
+
+
+def ensure_assets(force=False):
+    return {kind:import_master(kind,force) for kind in RAILS}
+
+
+def cell_objects(collection,column,row,layer):
+    root=map_root(collection)
+    if root is None:return []
+    bpy.context.view_layer.update()
+    inverse=root.matrix_world.inverted()
+    result=[]
+    for obj in collection.all_objects:
+        if not obj.get('snaked_component'):continue
+        if 'snaked_x' in obj and 'snaked_y' in obj:
+            obj_column=float(obj['snaked_x'])
+            obj_row=float(obj['snaked_y'])
+        else:
+            local=inverse@obj.matrix_world.translation
+            obj_column=float(local.x+.5)
+            obj_row=float(local.y+.5)
+        same_anchor=(abs(obj_column-column)<.001 and
+                     abs(obj_row-row)<.001 and
+                     int(obj.get('snaked_z',0))==layer)
+        if same_anchor:result.append(obj)
+    return result
+
+
+def half_step(value):
+    return abs(value*2-round(value*2))<.001
+
+
+def whole_step(value):
+    return abs(value-round(value))<.001
+
+
+def coordinate_label(value):
+    return ('%.1f'%value).replace('.','_')
+
+
+def place_rail(context,collection,kind,column,row,layer,rotation):
+    if collection.get(RAIL_PUZZLE_TAG):
+        size=collection.get('grid_size',[3,3,1])
+        if not (1<=column<=int(size[0]) and 1<=row<=int(size[1])):
+            raise ValueError('Rail puzzles use columns and rows 1-3')
+    elif not (2<=column<WIDTH and 2<=row<HEIGHT):
+        raise ValueError('Rails use interior columns 2-39 and rows 2-21')
+    corner = kind in {'CORNER', 'CORNER_MIRROR'}
+    if corner:
+        if not half_step(column) or not half_step(row):
+            raise ValueError('Corner rails use columns and rows in 0.5 steps')
+    elif not whole_step(column) or not whole_step(row):
+        raise ValueError('Straight and end rails use whole-number columns and rows')
+    root=map_root(collection)
+    if root is None:raise ValueError('The selected map has no Map Origin object')
+    occupants=cell_objects(collection,column,row,layer)
+    blocking=[obj for obj in occupants
+              if obj.get('snaked_component') in
+              {'BLOCK','WALL','RAMP','EXIT_DOOR'}]
+    if blocking:raise ValueError('That cell contains a solid component')
+    master=import_master(kind)
+    for old in [obj for obj in occupants
+                if obj.get('snaked_component')=='RAIL']:
+        bpy.data.objects.remove(old,do_unlink=True)
+    if collection.get(RAIL_PUZZLE_TAG):
+        prefix='RailPuzzle%03d'%int(collection.get('rail_puzzle_id',0))
+    else:
+        prefix='Map%03d'%int(collection.get('row_id',0))
+    obj=bpy.data.objects.new(
+        '%s_Rail_%s_%s_%s'%(prefix,kind.title(),
+                             coordinate_label(column),coordinate_label(row)),
+        master.data)
+    map_content(collection).objects.link(obj)
+    obj.parent=root
+    obj.location=(column-.5,row-.5,float(layer))
+    obj.scale=master.scale
+    obj.rotation_euler.z=(float(master.get('snaked_rail_base_rotation',0.0))+
+                          math.radians(rotation))
+    obj['snaked_component']='RAIL'
+    obj['snaked_rail_type']=kind
+    obj['snaked_x']=column
+    obj['snaked_y']=row
+    obj['snaked_z']=layer
+    obj['snaked_rot']=rotation
+    for selected in context.selected_objects:selected.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active=obj
+    return obj
+
+
+class SNAKEDRAIL_OT_import(bpy.types.Operator):
+    bl_idname='snaked_rail.import_assets'
+    bl_label='Import / Refresh Rail Assets'
+    bl_description='Append the four source meshes and normalize their scale'
+    bl_options={'REGISTER','UNDO'}
+    def execute(self,context):
+        try:assets=ensure_assets(force=True)
+        except ValueError as error:
+            self.report({'ERROR'},str(error));return {'CANCELLED'}
+        self.report({'INFO'},'Imported %d rail assets'%len(assets))
+        return {'FINISHED'}
+
+
+class SNAKEDRAIL_OT_place(bpy.types.Operator):
+    bl_idname='snaked_rail.place'
+    bl_label='Place Rail'
+    bl_description='Place one rail asset at the selected map cell'
+    bl_options={'REGISTER','UNDO'}
+    at_cursor:BoolProperty(default=False, options={'SKIP_SAVE'})
+    def execute(self,context):
+        scene=context.scene
+        collection=bpy.data.collections.get(scene.snaked_rail_map)
+        if collection is None or not (collection.get(MAP_TAG) or
+                                      collection.get(RAIL_PUZZLE_TAG)):
+            self.report({'WARNING'},'Choose a map or rail puzzle first')
+            return {'CANCELLED'}
+        column,row=scene.snaked_rail_column,scene.snaked_rail_row
+        if self.at_cursor:
+            root=map_root(collection)
+            if root is None:
+                self.report({'WARNING'},'The selected map has no Map Origin')
+                return {'CANCELLED'}
+            local=root.matrix_world.inverted()@scene.cursor.location
+            column,row=math.floor(local.x)+1,math.floor(local.y)+1
+        try:
+            obj=place_rail(context,collection,scene.snaked_rail_kind,
+                           column,row,scene.snaked_rail_layer,
+                           int(scene.snaked_rail_rotation))
+        except ValueError as error:
+            self.report({'WARNING'},str(error));return {'CANCELLED'}
+        self.report({'INFO'},'Placed '+obj.name)
+        return {'FINISHED'}
+
+
+class SNAKEDRAIL_PT_panel(bpy.types.Panel):
+    bl_label='Rails'
+    bl_idname='SNAKEDRAIL_PT_panel'
+    bl_space_type='VIEW_3D'
+    bl_region_type='UI'
+    bl_category='Snaked Maps'
+    def draw(self,context):
+        layout,scene=self.layout,context.scene
+        layout.prop(scene,'snaked_rail_map')
+        layout.prop(scene,'snaked_rail_kind')
+        row=layout.row(align=True)
+        row.prop(scene,'snaked_rail_column')
+        row.prop(scene,'snaked_rail_row')
+        layout.prop(scene,'snaked_rail_layer')
+        layout.prop(scene,'snaked_rail_rotation')
+        layout.operator('snaked_rail.place',icon='TRACKING').at_cursor=False
+        layout.operator('snaked_rail.place',text='Place at 3D Cursor',
+                        icon='PIVOT_CURSOR').at_cursor=True
+        layout.operator('snaked_rail.import_assets',icon='FILE_REFRESH')
+        layout.label(text='Rails are normalized to the 1-unit grid.')
+
+
+# Rail placement stays available to the Individual Components panel.  The
+# dedicated panel is intentionally omitted so all pieces share one list.
+CLASSES=(SNAKEDRAIL_OT_import,SNAKEDRAIL_OT_place)
+
+
+def register():
+    bpy.app.driver_namespace['snaked_place_rail']=place_rail
+    for old in reversed(bpy.app.driver_namespace.get(CLASS_KEY,())):
+        try:bpy.utils.unregister_class(old)
+        except RuntimeError:pass
+    for cls in CLASSES:bpy.utils.register_class(cls)
+    bpy.app.driver_namespace[CLASS_KEY]=CLASSES
+    bpy.types.Scene.snaked_rail_map=EnumProperty(name='Map',items=map_items)
+    bpy.types.Scene.snaked_rail_kind=EnumProperty(
+        name='Rail',items=[(kind,spec['label'],'Place '+spec['label'])
+                           for kind,spec in RAILS.items()])
+    bpy.types.Scene.snaked_rail_column=FloatProperty(
+        name='Column',default=2.0,min=1.0,max=WIDTH,step=50,precision=1)
+    bpy.types.Scene.snaked_rail_row=FloatProperty(
+        name='Row',default=2.0,min=1.0,max=HEIGHT,step=50,precision=1)
+    bpy.types.Scene.snaked_rail_layer=IntProperty(
+        name='Layer',default=0,min=0,max=20)
+    bpy.types.Scene.snaked_rail_rotation=EnumProperty(
+        name='Rotation',items=[(str(v),str(v)+' degrees','Rotate on the grid')
+                               for v in (0,90,180,270)])
+    try:ensure_assets()
+    except ValueError as error:print('[Rails]',error)
+
+
+if __name__=='__main__':register()

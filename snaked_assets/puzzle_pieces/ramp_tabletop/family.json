@@ -1,0 +1,23 @@
+{
+  "family_id": "ramp_tabletop",
+  "family_name": "Tabletop",
+  "core_idea": "Ramp puzzle 'Tabletop' and its generated orientations.",
+  "main_mechanics": [
+    "ramp"
+  ],
+  "base_piece_id": "ramp_tabletop_r0",
+  "variation_ids": [
+    "ramp_tabletop_r90",
+    "ramp_tabletop_r180",
+    "ramp_tabletop_r270"
+  ],
+  "difficulty_range": [
+    0,
+    0
+  ],
+  "tags": [
+    "ramp",
+    "tabletop"
+  ],
+  "notes": ""
+}
